@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.pyc
+*.egg-info/
+.eggs/
+dist/
+build/
+
+# Artifacts (large binary data)
+artifacts/
+
+# IDE
+.vscode/
+.idea/
+.cursor/
+
+# Environment
+.venv/
+.env
+
+# OS
+.DS_Store
+
+# Spec story (cursor)
+.specstory/
+.cursorindexingignore

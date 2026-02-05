@@ -1,0 +1,22 @@
+[project]
+name = "sigiltree"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = [
+    "pillow>=10.0",
+    "aiohttp>=3.9",
+    "aiosqlite>=0.19",
+]
+
+[project.optional-dependencies]
+dev = ["pytest", "pytest-asyncio"]
+
+[project.scripts]
+sigiltree = "sigiltree.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["sigiltree*"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
