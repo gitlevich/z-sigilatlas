@@ -35,6 +35,7 @@ def create_app(artifact_dir: Path) -> web.Application:
     app.router.add_get("/api/atlas/level/{level}/meta", handle_atlas_level_meta)
     app.router.add_get("/api/atlas/node/{node_id}/children", handle_atlas_node_children)
     app.router.add_get("/api/atlas/neighborhood/{node_id}", handle_atlas_neighborhood)
+    app.router.add_get("/api/atlas/sigil_scores", handle_atlas_sigil_scores)
     app.router.add_get("/atlas_tiles/{path:.*}", handle_atlas_tile)
     app.router.add_static(
         "/thumbs", str(artifact_dir / "thumbnails"), show_index=False
@@ -331,6 +332,46 @@ async def handle_atlas_neighborhood(request: web.Request) -> web.Response:
         "parent_id": node.get("parent_id"),
         "representative_ids": node["representative_ids"],
         "members": members,
+    })
+
+
+async def handle_atlas_sigil_scores(request: web.Request) -> web.Response:
+    from sigiltree.arcade import load_sigil
+    from sigiltree.atlas import load_atlas_meta
+    from sigiltree.sigil_scoring import compute_sigil_scores
+
+    artifact_dir = request.app["artifact_dir"]
+    user_id = request.query.get("user_id", "default")
+    level = int(request.query.get("level", "0"))
+
+    sigil = load_sigil(artifact_dir, user_id)
+    if sigil is None:
+        return web.json_response({"error": "No sigil found"}, status=404)
+
+    lib_path = artifact_dir / "contrasts" / "contrast_library.json"
+    if not lib_path.exists():
+        return web.json_response({"error": "No contrast library"}, status=404)
+    library = json.loads(lib_path.read_text())
+
+    coords_path = artifact_dir / "contrasts" / "coordinates.json"
+    if not coords_path.exists():
+        return web.json_response({"error": "No coordinates"}, status=404)
+    coordinates = json.loads(coords_path.read_text())
+
+    meta = load_atlas_meta(artifact_dir, level=level)
+    if meta is None:
+        return web.json_response({"error": f"No atlas level {level}"}, status=404)
+
+    scores = compute_sigil_scores(sigil, library, coordinates, meta["nodes"])
+
+    collapsed_names = [e["contrast_name"] for e in sigil.get("entries", {}).values()]
+
+    return web.json_response({
+        "user_id": user_id,
+        "sigil_version": sigil.get("version", ""),
+        "collapsed_contrasts": collapsed_names,
+        "level": level,
+        "scores": scores,
     })
 
 
@@ -1073,6 +1114,14 @@ ATLAS_VIEWER_HTML = r"""<!DOCTYPE html>
     line-height: 1.5; max-width: 350px;
   }
   #debug-overlay.active { display: block; }
+  /* Sigil indicator */
+  #sigilIndicator {
+    display: none; margin-left: 12px; padding: 2px 8px; border-radius: 3px;
+    font-size: 11px; font-weight: 600;
+    background: rgba(255,170,0,0.15); color: #fa6;
+    border: 1px solid rgba(255,170,0,0.3);
+  }
+  #sigilIndicator.active { display: inline; }
   /* Member panel */
   #neighborhood-panel {
     display: none; position: fixed; bottom: 0; left: 0; right: 0;
@@ -1103,6 +1152,7 @@ ATLAS_VIEWER_HTML = r"""<!DOCTYPE html>
   <span class="title">Sigil Tree Atlas</span>
   <span class="stats" id="stats">Loading...</span>
   <span class="breadcrumb" id="breadcrumb"></span>
+  <span id="sigilIndicator">SIGIL</span>
   <span class="mode" id="modeLabel">L0</span>
 </div>
 <canvas id="atlas-canvas"></canvas>
@@ -1164,6 +1214,13 @@ let dragStart = { x: 0, y: 0 };
 let camStart = { x: 0, y: 0 };
 let lastMousePos = { x: 0, y: 0 };
 let hoveredNode = null;
+
+// Sigil overlay
+let sigilActive = false;
+let sigilScores = {};       // {level: {node_id: {score, breakdown}}}
+let sigilVisual = {};       // {level: {node_id: float}} rank-stretched to [0,1]
+let sigilMeta = null;       // {sigil_version, collapsed_contrasts}
+let sigilFetching = false;
 
 // Animation
 let animFrameId = null;
@@ -1363,6 +1420,73 @@ function updateKeyboardDriving() {
 }
 
 // ---------------------------------------------------------------------------
+// Sigil overlay
+// ---------------------------------------------------------------------------
+
+async function fetchSigilScores(level) {
+  if (sigilFetching) return;
+  const cacheKey = sigilMeta ? `${sigilMeta.sigil_version}_${level}` : null;
+  if (sigilScores[level] && cacheKey && sigilScores[`_key_${level}`] === cacheKey) return;
+
+  sigilFetching = true;
+  try {
+    const r = await fetch(`/api/atlas/sigil_scores?user_id=default&level=${level}`);
+    if (!r.ok) {
+      if (r.status === 404) {
+        // No sigil exists — deactivate silently
+        sigilActive = false;
+        updateSigilIndicator();
+      }
+      sigilFetching = false;
+      return;
+    }
+    const data = await r.json();
+    sigilMeta = {
+      sigil_version: data.sigil_version,
+      collapsed_contrasts: data.collapsed_contrasts,
+    };
+    sigilScores[level] = data.scores;
+    sigilScores[`_key_${level}`] = `${data.sigil_version}_${level}`;
+    stretchSigilScores(level);
+    scheduleFrame();
+  } catch (e) {
+    sigilActive = false;
+    updateSigilIndicator();
+  }
+  sigilFetching = false;
+}
+
+function stretchSigilScores(level) {
+  // Rank-normalize raw scores to spread across full [0,1] visual range.
+  // Raw scores stay in sigilScores for debug readout; visual scores go to sigilVisual.
+  const raw = sigilScores[level];
+  if (!raw) return;
+  const entries = Object.entries(raw);
+  if (entries.length <= 1) {
+    sigilVisual[level] = {};
+    for (const [nid, d] of entries) sigilVisual[level][nid] = 0.5;
+    return;
+  }
+  const vals = entries.map(([_, d]) => d.score);
+  const lo = Math.min(...vals);
+  const hi = Math.max(...vals);
+  const range = hi - lo;
+  sigilVisual[level] = {};
+  for (const [nid, d] of entries) {
+    sigilVisual[level][nid] = range > 0.001 ? (d.score - lo) / range : 0.5;
+  }
+}
+
+function updateSigilIndicator() {
+  const el = document.getElementById('sigilIndicator');
+  if (sigilActive) {
+    el.classList.add('active');
+  } else {
+    el.classList.remove('active');
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Tile loading & prefetching
 // ---------------------------------------------------------------------------
 
@@ -1436,6 +1560,40 @@ function draw() {
       ctx.fillRect(tl.x, tl.y, sw, sh);
     }
 
+    // Sigil overlay: dim non-aligned, brighten aligned
+    // Uses rank-stretched visual scores for perceptible contrast
+    if (sigilActive) {
+      const lvl = currentLevel();
+      const vis = sigilVisual[lvl];
+      if (vis !== undefined) {
+        const vs = vis[node.node_id];
+        if (vs !== undefined) {
+          // Dim: stronger dimming for low-scoring nodes
+          const dimAlpha = (1.0 - vs) * 0.65;
+          if (dimAlpha > 0.01) {
+            ctx.fillStyle = `rgba(0,0,0,${dimAlpha.toFixed(3)})`;
+            ctx.fillRect(tl.x, tl.y, sw, sh);
+          }
+          // Halo: double-stroke amber glow for top-ranked nodes
+          if (vs > 0.55) {
+            const t = (vs - 0.55) / 0.45;  // 0..1 over the top half
+            // Inner glow
+            const innerAlpha = t * 0.7;
+            ctx.strokeStyle = `rgba(255,170,0,${innerAlpha.toFixed(3)})`;
+            ctx.lineWidth = Math.max(2, Math.min(5, sw * 0.012));
+            ctx.strokeRect(tl.x + 1, tl.y + 1, sw - 2, sh - 2);
+            // Outer glow (wider, more transparent)
+            if (vs > 0.75) {
+              const outerAlpha = (vs - 0.75) / 0.25 * 0.35;
+              ctx.strokeStyle = `rgba(255,200,50,${outerAlpha.toFixed(3)})`;
+              ctx.lineWidth = Math.max(3, Math.min(8, sw * 0.02));
+              ctx.strokeRect(tl.x - 1, tl.y - 1, sw + 2, sh + 2);
+            }
+          }
+        }
+      }
+    }
+
     // Border
     const hasChildren = node.child_ids && node.child_ids.length > 0;
     ctx.strokeStyle = hasChildren ? '#555' : '#333';
@@ -1470,7 +1628,20 @@ function drawMinimap() {
   // Draw level 0 rects
   for (const node of level0Nodes) {
     const [rx, ry, rw, rh] = node.rect;
-    minimapCtx.fillStyle = '#2a2a2a';
+    // Tint minimap rects by visual sigil score when active
+    if (sigilActive && sigilVisual[0]) {
+      const vs = sigilVisual[0][node.node_id];
+      if (vs !== undefined) {
+        const r = Math.round(42 + vs * 40);
+        const g = Math.round(42 + vs * 30);
+        const b = Math.round(42 - vs * 10);
+        minimapCtx.fillStyle = `rgb(${r},${g},${b})`;
+      } else {
+        minimapCtx.fillStyle = '#2a2a2a';
+      }
+    } else {
+      minimapCtx.fillStyle = '#2a2a2a';
+    }
     minimapCtx.fillRect(rx * mw, ry * mh, rw * mw, rh * mh);
     minimapCtx.strokeStyle = '#444';
     minimapCtx.lineWidth = 0.5;
@@ -1557,6 +1728,30 @@ function drawDebug() {
 
   html += `<b>Tile cache:</b> ${Object.keys(tileCache).length} entries<br>`;
   html += `<b>Max level:</b> ${manifest ? manifest.max_level : '?'}<br>`;
+
+  // Sigil "why" readout
+  if (sigilActive && hoveredNode) {
+    const lvl = currentLevel();
+    const scores = sigilScores[lvl];
+    if (scores) {
+      const ns = scores[hoveredNode.node_id];
+      if (ns) {
+        html += `<br><b>--- Sigil ---</b><br>`;
+        html += `<b>Score:</b> ${ns.score.toFixed(3)}<br>`;
+        for (const entry of ns.breakdown) {
+          const arrow = entry.direction === 'right' ? 'HIGH' : 'LOW';
+          html += `<b>${entry.contrast_name}</b>: `;
+          html += `mean=${entry.node_mean.toFixed(3)} `;
+          html += `norm=${entry.normalized.toFixed(2)} `;
+          html += `(${arrow} x${entry.strength.toFixed(1)}) `;
+          html += `= ${entry.contribution.toFixed(3)}<br>`;
+        }
+      }
+    }
+  } else if (sigilActive) {
+    html += `<br><b>Sigil:</b> active (hover node for detail)<br>`;
+  }
+
   el.innerHTML = html;
 }
 
@@ -1685,6 +1880,11 @@ async function enterNode(node) {
 
   closeMembers();
   updateBreadcrumb();
+
+  // Fetch sigil scores for new level
+  if (sigilActive) {
+    fetchSigilScores(node.level + 1);
+  }
 }
 
 function exitToParent() {
@@ -1866,6 +2066,13 @@ document.addEventListener('keydown', (e) => {
     if (hoveredNode) {
       enterNode(hoveredNode);
     }
+  } else if (e.key === 'g' || e.key === 'G') {
+    sigilActive = !sigilActive;
+    if (sigilActive) {
+      fetchSigilScores(currentLevel());
+    }
+    updateSigilIndicator();
+    scheduleFrame();
   }
 });
 

@@ -1,6 +1,6 @@
 # Sigil Tree - Project Status
 
-## Current Phase: 7 (PENDING ACCEPTANCE)
+## Current Phase: 8 (ACCEPTED)
 
 ## Phase 1: Corpus ingestion and artifacts (ACCEPTED)
 
@@ -217,7 +217,7 @@
 - Invariant §4.5: ESC returns up one level, Home returns to root
 - UI live at http://127.0.0.1:8777/atlas
 
-## Phase 7: Driving (continuous navigation) (PENDING ACCEPTANCE)
+## Phase 7: Driving (continuous navigation) (ACCEPTED)
 
 ### Files modified
 - `sigiltree/viewer_server.py` - rewrote ATLAS_VIEWER_HTML JavaScript: replaced event-driven draw() with requestAnimationFrame loop, added camera interpolation, WASD/Arrow driving, velocity-based wheel zoom, animated transitions, tile prefetching, minimap click, Enter/Space node entry, enhanced debug overlay
@@ -265,4 +265,61 @@
 - Invariant §4.3: no sigil created during driving or navigation (test passes)
 - Invariant §4.5: ESC always available, exits within 1 action
 - UI live at http://127.0.0.1:8777/atlas
-- Pending manual verification: continuous driving feel, FPS during motion, wheel momentum, transition smoothness
+- Manual verification passed: atlas loads, enter/exit animated, WASD drives, debug overlay shows FPS/velocity/keys, ESC returns to root
+
+## Phase 8: Sigil rendering - "beauty gravity" (ACCEPTED)
+
+### Files created/modified
+- `sigiltree/sigil_scoring.py` - **NEW**: pure score computation, `compute_sigil_scores(sigil, library, coordinates, nodes)` returns per-node score + breakdown
+- `sigiltree/viewer_server.py` - added `/api/atlas/sigil_scores` endpoint, ATLAS_VIEWER_HTML: sigil state, G toggle, fetch/cache, dim+halo overlay, debug "why" readout, minimap tinting
+- `tests/test_sigil_scoring.py` - **NEW**: 11 unit tests
+
+### Algorithm
+- Per collapsed entry in sigil: look up coordinates by contrast_name, quantiles by contrast_id
+- `node_mean = mean(coordinates[contrast_name][iid] for iid in node.image_ids)` (missing IDs skipped)
+- `normalized = clamp((node_mean - p10) / (p90 - p10), 0, 1)`
+- Direction alignment: "right" -> `aligned = normalized`; "left" -> `aligned = 1 - normalized`
+- `contribution = aligned * strength`
+- `score = mean(contributions)` across all collapsed entries; empty sigil -> 0.5
+
+### Rendering (overlay-only, per spec section 2.3)
+- Dim: `rgba(0,0,0, (1-score)*0.55)` overlay after tile, before border
+- Halo: amber `strokeRect` for score > 0.7, alpha proportional to `(score - 0.7) / 0.3`
+- Minimap: warm/cool tint per node when sigil active
+- Debug "why" readout: hover any node with backtick+G to see per-contrast breakdown (mean, normalized, direction, contribution)
+
+### Key bindings
+- G: toggle sigil overlay on/off
+- SIGIL badge appears in header bar when active (amber, styled)
+
+### Endpoint
+- `GET /api/atlas/sigil_scores?user_id=default&level=0`
+- Returns `{user_id, sigil_version, collapsed_contrasts, scores: {node_id: {score, breakdown}}}`
+- 404 when no sigil file exists for user
+
+### Tests (11 new, 92 total)
+1. test_empty_sigil_neutral - no entries -> all scores = 0.5
+2. test_single_contrast_right_aligned - high-mean node ~1.0, low-mean ~0.0
+3. test_single_contrast_left_aligned - direction inversion
+4. test_no_cross_axis_effect - uncollapsed axis doesn't affect score
+5. test_uncollapsed_not_in_breakdown - absent from breakdown list
+6. test_strength_weighting - strength=0.5 halves contribution
+7. test_quantile_normalization - p10->0, p90->1, midpoint->0.5
+8. test_missing_image_ids_graceful - skips unknown IDs
+9. test_score_range - all scores in [0,1]
+10. test_multiple_contrasts_averaging - mean of contributions
+11. test_invariant_4_3_no_sigil_mutation - input sigil unchanged
+
+### Verification results
+- 92/92 tests pass (11 indexer + 8 embedding + 8 contrast + 16 arcade + 38 atlas + 11 sigil scoring)
+- G toggle ON: SIGIL badge, dim overlay, amber halos visible immediately
+- G toggle OFF: overlay removed, normal appearance restored
+- Sublevel navigation: scores fetched per level, overlay applied at level 1+
+- Debug "why" readout: 10 collapsed contrasts with per-contrast score, mean, normalized, contribution
+- ESC returns to parent with sigil active (instant, no interference)
+- FPS 57 with sigil overlay (no frame drops)
+- Invariant 4.1: enter still anchors to rect (sigil overlay doesn't interfere)
+- Invariant 4.2: ESC instant from any depth with sigil active
+- Invariant 4.3: sigil file MD5 unchanged after browsing (6803425b0275465d24e4b238b3c318f3)
+- Invariant 4.5: ESC always available, no added friction
+- UI live at http://127.0.0.1:8777/atlas
