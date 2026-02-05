@@ -1123,11 +1123,28 @@ const minimapCanvas = document.getElementById('minimap');
 const minimapCtx = minimapCanvas.getContext('2d');
 
 // ---------------------------------------------------------------------------
+// Constants
+// ---------------------------------------------------------------------------
+
+const CAM_LERP = 0.15;
+const CAM_POS_THRESHOLD = 0.5;
+const CAM_ZOOM_THRESHOLD = 0.001;
+const DRIVE_SPEED = 8;
+const ZOOM_KEY_FACTOR = 1.02;
+const ZOOM_SENSITIVITY = 0.003;
+const ZOOM_FRICTION = 0.85;
+const PAN_FRICTION = 0.88;
+const PREFETCH_MARGIN = 1.5;
+const PREFETCH_INTERVAL = 10;
+
+// ---------------------------------------------------------------------------
 // State
 // ---------------------------------------------------------------------------
 
 let manifest = null;
 let cam = { x: 0, y: 0, zoom: 1 };
+let camTarget = { x: 0, y: 0, zoom: 1 };
+let camVel = { x: 0, y: 0, z: 0 };
 let debugMode = false;
 let showingMembers = false;
 
@@ -1145,6 +1162,21 @@ let level0Nodes = [];
 let dragging = false;
 let dragStart = { x: 0, y: 0 };
 let camStart = { x: 0, y: 0 };
+let lastMousePos = { x: 0, y: 0 };
+let hoveredNode = null;
+
+// Animation
+let animFrameId = null;
+let frameCount = 0;
+let lastTickTime = 0;
+let fpsCounter = { frames: 0, lastTime: 0, fps: 0 };
+
+// Keyboard driving
+const keysDown = new Set();
+const DRIVE_KEYS = new Set([
+  'w','a','s','d','q','e',
+  'ArrowUp','ArrowDown','ArrowLeft','ArrowRight',
+]);
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -1179,12 +1211,162 @@ function fitToRect(rx, ry, rw, rh, viewW, viewH, padding) {
   return { x: cx, y: cy, zoom: zoom };
 }
 
+function setCameraImmediate(newCam) {
+  cam.x = newCam.x;
+  cam.y = newCam.y;
+  cam.zoom = newCam.zoom;
+  camTarget.x = newCam.x;
+  camTarget.y = newCam.y;
+  camTarget.zoom = newCam.zoom;
+  camVel.x = 0;
+  camVel.y = 0;
+  camVel.z = 0;
+}
+
+function setCameraTarget(newCam) {
+  camTarget.x = newCam.x;
+  camTarget.y = newCam.y;
+  camTarget.zoom = newCam.zoom;
+  scheduleFrame();
+}
+
 // ---------------------------------------------------------------------------
-// Tile loading
+// Animation loop
+// ---------------------------------------------------------------------------
+
+function scheduleFrame() {
+  if (animFrameId === null) {
+    animFrameId = requestAnimationFrame(tick);
+  }
+}
+
+function tick(timestamp) {
+  animFrameId = null;
+  frameCount++;
+
+  // FPS tracking
+  fpsCounter.frames++;
+  if (timestamp - fpsCounter.lastTime >= 1000) {
+    fpsCounter.fps = fpsCounter.frames;
+    fpsCounter.frames = 0;
+    fpsCounter.lastTime = timestamp;
+  }
+
+  lastTickTime = timestamp;
+
+  updateKeyboardDriving();
+  updateCamera();
+
+  if (frameCount % PREFETCH_INTERVAL === 0) {
+    prefetchTiles();
+  }
+
+  draw();
+
+  // Continue if still moving
+  if (isMoving()) {
+    animFrameId = requestAnimationFrame(tick);
+  }
+}
+
+function isMoving() {
+  if (keysDown.size > 0) return true;
+  if (Math.abs(camVel.x) > 0.1 || Math.abs(camVel.y) > 0.1 || Math.abs(camVel.z) > 0.0001) return true;
+  if (Math.abs(camTarget.x - cam.x) > CAM_POS_THRESHOLD) return true;
+  if (Math.abs(camTarget.y - cam.y) > CAM_POS_THRESHOLD) return true;
+  if (Math.abs(camTarget.zoom / cam.zoom - 1) > CAM_ZOOM_THRESHOLD) return true;
+  return false;
+}
+
+function updateCamera() {
+  // Apply velocity to target
+  if (Math.abs(camVel.x) > 0.1) {
+    camTarget.x += camVel.x;
+    camVel.x *= PAN_FRICTION;
+  } else {
+    camVel.x = 0;
+  }
+  if (Math.abs(camVel.y) > 0.1) {
+    camTarget.y += camVel.y;
+    camVel.y *= PAN_FRICTION;
+  } else {
+    camVel.y = 0;
+  }
+  if (Math.abs(camVel.z) > 0.0001) {
+    const oldZoom = camTarget.zoom;
+    camTarget.zoom *= (1 + camVel.z);
+    // Anchor zoom to last mouse position
+    const rect = canvas.getBoundingClientRect();
+    const mx = lastMousePos.x - rect.left;
+    const my = lastMousePos.y - rect.top;
+    camTarget.x = mx - (mx - camTarget.x) * (camTarget.zoom / oldZoom);
+    camTarget.y = my - (my - camTarget.y) * (camTarget.zoom / oldZoom);
+    camVel.z *= ZOOM_FRICTION;
+  } else {
+    camVel.z = 0;
+  }
+
+  // Lerp cam toward camTarget
+  cam.x += (camTarget.x - cam.x) * CAM_LERP;
+  cam.y += (camTarget.y - cam.y) * CAM_LERP;
+  cam.zoom += (camTarget.zoom - cam.zoom) * CAM_LERP;
+
+  // Snap when close enough
+  if (Math.abs(camTarget.x - cam.x) < CAM_POS_THRESHOLD &&
+      Math.abs(camTarget.y - cam.y) < CAM_POS_THRESHOLD &&
+      Math.abs(camTarget.zoom / cam.zoom - 1) < CAM_ZOOM_THRESHOLD) {
+    cam.x = camTarget.x;
+    cam.y = camTarget.y;
+    cam.zoom = camTarget.zoom;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Keyboard driving
+// ---------------------------------------------------------------------------
+
+function updateKeyboardDriving() {
+  if (keysDown.size === 0) return;
+
+  const speed = DRIVE_SPEED / cam.zoom * cam.zoom;
+  // Speed in screen pixels, independent of zoom: DRIVE_SPEED px/frame
+  const panSpeed = DRIVE_SPEED;
+
+  if (keysDown.has('w') || keysDown.has('ArrowUp')) {
+    camTarget.y += panSpeed;
+  }
+  if (keysDown.has('s') || keysDown.has('ArrowDown')) {
+    camTarget.y -= panSpeed;
+  }
+  if (keysDown.has('a') || keysDown.has('ArrowLeft')) {
+    camTarget.x += panSpeed;
+  }
+  if (keysDown.has('d') || keysDown.has('ArrowRight')) {
+    camTarget.x -= panSpeed;
+  }
+  if (keysDown.has('q')) {
+    const cw = canvas.clientWidth, ch = canvas.clientHeight;
+    const cx = cw / 2, cy = ch / 2;
+    const oldZoom = camTarget.zoom;
+    camTarget.zoom *= ZOOM_KEY_FACTOR;
+    camTarget.x = cx - (cx - camTarget.x) * (camTarget.zoom / oldZoom);
+    camTarget.y = cy - (cy - camTarget.y) * (camTarget.zoom / oldZoom);
+  }
+  if (keysDown.has('e')) {
+    const cw = canvas.clientWidth, ch = canvas.clientHeight;
+    const cx = cw / 2, cy = ch / 2;
+    const oldZoom = camTarget.zoom;
+    camTarget.zoom /= ZOOM_KEY_FACTOR;
+    camTarget.x = cx - (cx - camTarget.x) * (camTarget.zoom / oldZoom);
+    camTarget.y = cy - (cy - camTarget.y) * (camTarget.zoom / oldZoom);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Tile loading & prefetching
 // ---------------------------------------------------------------------------
 
 function tilePath(node) {
-  // Multi-level: tiles are at atlas_tiles/level{L}/tiles/...
   return `/atlas_tiles/level${node.level}/${node.tile_path}`;
 }
 
@@ -1192,9 +1374,28 @@ function ensureTile(node) {
   if (tileCache[node.node_id]) return;
   const img = new window.Image();
   tileCache[node.node_id] = { img: img, loaded: false };
-  img.onload = () => { tileCache[node.node_id].loaded = true; draw(); };
+  img.onload = () => {
+    tileCache[node.node_id].loaded = true;
+    scheduleFrame();
+  };
   img.onerror = () => {};
   img.src = tilePath(node);
+}
+
+function prefetchTiles() {
+  const cw = canvas.clientWidth, ch = canvas.clientHeight;
+  const marginX = cw * (PREFETCH_MARGIN - 1) / 2;
+  const marginY = ch * (PREFETCH_MARGIN - 1) / 2;
+  const nodes = currentNodes();
+  for (const node of nodes) {
+    const [rx, ry, rw, rh] = node.rect;
+    const tl = worldToScreen(rx, ry);
+    const sw = rw * cam.zoom;
+    const sh = rh * cam.zoom;
+    if (tl.x + sw < -marginX || tl.y + sh < -marginY ||
+        tl.x > cw + marginX || tl.y > ch + marginY) continue;
+    ensureTile(node);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1205,7 +1406,7 @@ function resize() {
   canvas.width = canvas.clientWidth * devicePixelRatio;
   canvas.height = canvas.clientHeight * devicePixelRatio;
   ctx.setTransform(devicePixelRatio, 0, 0, devicePixelRatio, 0, 0);
-  draw();
+  scheduleFrame();
 }
 
 function draw() {
@@ -1304,6 +1505,21 @@ function drawMinimap() {
   }
 }
 
+// Minimap click: navigate to clicked world position
+minimapCanvas.addEventListener('click', (e) => {
+  const rect = minimapCanvas.getBoundingClientRect();
+  const mx = e.clientX - rect.left;
+  const my = e.clientY - rect.top;
+  // Map minimap pixel to world coords [0,1]
+  const wx = mx / 120;
+  const wy = my / 120;
+  // Center viewport on this world point
+  const cw = canvas.clientWidth, ch = canvas.clientHeight;
+  camTarget.x = cw / 2 - wx * camTarget.zoom;
+  camTarget.y = ch / 2 - wy * camTarget.zoom;
+  scheduleFrame();
+});
+
 // ---------------------------------------------------------------------------
 // Debug overlay
 // ---------------------------------------------------------------------------
@@ -1319,16 +1535,24 @@ function drawDebug() {
   const cw = canvas.clientWidth, ch = canvas.clientHeight;
   const center = screenToWorld(cw / 2, ch / 2);
 
-  let html = `<b>Level:</b> ${f.level}<br>`;
+  let html = `<b>FPS:</b> ${fpsCounter.fps}<br>`;
+  html += `<b>Level:</b> ${f.level}<br>`;
   html += `<b>Stack depth:</b> ${viewStack.length}<br>`;
   html += `<b>Nodes:</b> ${f.nodes.length}<br>`;
   html += `<b>Camera:</b> x=${cam.x.toFixed(0)} y=${cam.y.toFixed(0)} z=${cam.zoom.toFixed(0)}<br>`;
+  html += `<b>Target:</b> x=${camTarget.x.toFixed(0)} y=${camTarget.y.toFixed(0)} z=${camTarget.zoom.toFixed(0)}<br>`;
+  html += `<b>Velocity:</b> x=${camVel.x.toFixed(1)} y=${camVel.y.toFixed(1)} z=${camVel.z.toFixed(4)}<br>`;
   html += `<b>Center:</b> (${center.x.toFixed(4)}, ${center.y.toFixed(4)})<br>`;
+  html += `<b>Keys:</b> ${keysDown.size > 0 ? [...keysDown].join('+') : 'none'}<br>`;
 
   if (f.parentNode) {
     const pn = f.parentNode;
     html += `<b>Parent:</b> ${pn.node_id} [${pn.rect.map(v => v.toFixed(3)).join(', ')}]<br>`;
     html += `<b>Parent size:</b> ${pn.size} images<br>`;
+  }
+
+  if (hoveredNode) {
+    html += `<b>Hover:</b> ${hoveredNode.node_id} (${hoveredNode.size} imgs)<br>`;
   }
 
   html += `<b>Tile cache:</b> ${Object.keys(tileCache).length} entries<br>`;
@@ -1393,7 +1617,7 @@ async function init() {
 
     fitOverview();
     updateBreadcrumb();
-    draw();
+    scheduleFrame();
   } catch (e) {
     document.getElementById('stats').textContent = 'Error loading atlas: ' + e.message;
   }
@@ -1403,13 +1627,12 @@ function fitOverview() {
   const cw = canvas.clientWidth;
   const ch = canvas.clientHeight;
   const padding = 20;
-  cam = fitToRect(0, 0, 1, 1, cw, ch, padding);
+  setCameraImmediate(fitToRect(0, 0, 1, 1, cw, ch, padding));
 }
 
 function hitTest(sx, sy) {
   const w = screenToWorld(sx, sy);
   const nodes = currentNodes();
-  // Return the smallest node containing the point (deepest match)
   let best = null;
   let bestArea = Infinity;
   for (const node of nodes) {
@@ -1426,7 +1649,6 @@ function hitTest(sx, sy) {
 }
 
 async function enterNode(node) {
-  // If leaf or has no children, show member panel
   if (node.is_leaf || !node.child_ids || node.child_ids.length === 0) {
     showMembers(node);
     return;
@@ -1455,46 +1677,45 @@ async function enterNode(node) {
     parentNode: node,
   });
 
-  // Zoom camera into parent rect
+  // Animated zoom into parent rect
   const [rx, ry, rw, rh] = node.rect;
   const cw = canvas.clientWidth;
   const ch = canvas.clientHeight;
-  cam = fitToRect(rx, ry, rw, rh, cw, ch, 20);
+  setCameraTarget(fitToRect(rx, ry, rw, rh, cw, ch, 20));
 
   closeMembers();
   updateBreadcrumb();
-  draw();
 }
 
 function exitToParent() {
   if (showingMembers) {
     closeMembers();
-    draw();
+    scheduleFrame();
     return;
   }
 
   if (viewStack.length <= 1) {
-    // Already at root, just fit overview
     fitOverview();
     updateBreadcrumb();
-    draw();
+    scheduleFrame();
     return;
   }
 
   // Pop current frame
   viewStack.pop();
 
-  // Restore camera from parent frame (instant, no network request)
+  // Animated restore from parent frame
   const parentFrame = currentFrame();
   if (parentFrame && parentFrame.camera) {
-    cam = { ...parentFrame.camera };
+    setCameraTarget({ ...parentFrame.camera });
   } else {
-    fitOverview();
+    const cw = canvas.clientWidth;
+    const ch = canvas.clientHeight;
+    setCameraTarget(fitToRect(0, 0, 1, 1, cw, ch, 20));
   }
 
   closeMembers();
   updateBreadcrumb();
-  draw();
 }
 
 function popToLevel(stackIndex) {
@@ -1503,13 +1724,14 @@ function popToLevel(stackIndex) {
   }
   const frame = currentFrame();
   if (frame && frame.camera) {
-    cam = { ...frame.camera };
+    setCameraTarget({ ...frame.camera });
   } else {
-    fitOverview();
+    const cw = canvas.clientWidth;
+    const ch = canvas.clientHeight;
+    setCameraTarget(fitToRect(0, 0, 1, 1, cw, ch, 20));
   }
   closeMembers();
   updateBreadcrumb();
-  draw();
 }
 
 // ---------------------------------------------------------------------------
@@ -1520,14 +1742,13 @@ async function showMembers(node) {
   showingMembers = true;
   updateBreadcrumb();
 
-  // Zoom to node rect
+  // Animated zoom to node rect
   const [rx, ry, rw, rh] = node.rect;
   const cw = canvas.clientWidth;
   const ch = canvas.clientHeight;
   const panelH = Math.min(ch * 0.5, 300);
   const viewH = ch - panelH;
-  cam = fitToRect(rx, ry, rw, rh, cw, viewH, 30);
-  draw();
+  setCameraTarget(fitToRect(rx, ry, rw, rh, cw, viewH, 30));
 
   const level = node.level !== undefined ? node.level : currentLevel();
   const r = await fetch(`/api/atlas/neighborhood/${node.node_id}?level=${level}`);
@@ -1564,10 +1785,23 @@ canvas.addEventListener('mousedown', (e) => {
 });
 
 canvas.addEventListener('mousemove', (e) => {
+  lastMousePos = { x: e.clientX, y: e.clientY };
+
+  // Update hovered node
+  const rect = canvas.getBoundingClientRect();
+  hoveredNode = hitTest(e.clientX - rect.left, e.clientY - rect.top);
+
   if (!dragging) return;
-  cam.x = camStart.x + (e.clientX - dragStart.x);
-  cam.y = camStart.y + (e.clientY - dragStart.y);
-  draw();
+  // Direct manipulation: bypass lerp for zero-latency feel
+  const dx = e.clientX - dragStart.x;
+  const dy = e.clientY - dragStart.y;
+  cam.x = camStart.x + dx;
+  cam.y = camStart.y + dy;
+  camTarget.x = cam.x;
+  camTarget.y = cam.y;
+  camVel.x = 0;
+  camVel.y = 0;
+  scheduleFrame();
 });
 
 canvas.addEventListener('mouseup', (e) => {
@@ -1587,19 +1821,19 @@ canvas.addEventListener('mouseup', (e) => {
 
 canvas.addEventListener('wheel', (e) => {
   e.preventDefault();
-  if (e.ctrlKey) {
-    const rect = canvas.getBoundingClientRect();
-    const mx = e.clientX - rect.left;
-    const my = e.clientY - rect.top;
-    const factor = e.deltaY < 0 ? 1.15 : 1 / 1.15;
-    cam.x = mx - (mx - cam.x) * factor;
-    cam.y = my - (my - cam.y) * factor;
-    cam.zoom *= factor;
-  } else {
-    cam.x -= e.deltaX;
-    cam.y -= e.deltaY;
+  const rect = canvas.getBoundingClientRect();
+  lastMousePos = { x: e.clientX, y: e.clientY };
+
+  if (e.ctrlKey || Math.abs(e.deltaX) < Math.abs(e.deltaY) * 0.3) {
+    // Zoom: velocity-based
+    camVel.z -= e.deltaY * ZOOM_SENSITIVITY;
   }
-  draw();
+  if (!e.ctrlKey) {
+    // Pan: velocity-based
+    camVel.x -= e.deltaX * 0.5;
+    camVel.y -= e.deltaY * 0.5;
+  }
+  scheduleFrame();
 }, { passive: false });
 
 // ---------------------------------------------------------------------------
@@ -1607,19 +1841,41 @@ canvas.addEventListener('wheel', (e) => {
 // ---------------------------------------------------------------------------
 
 document.addEventListener('keydown', (e) => {
+  // Drive keys
+  if (DRIVE_KEYS.has(e.key)) {
+    e.preventDefault();
+    keysDown.add(e.key);
+    scheduleFrame();
+    return;
+  }
+
   if (e.key === 'Escape') {
     exitToParent();
   } else if (e.key === 'Home' || e.key === 'h' || e.key === 'H') {
-    // Pop all to root
     while (viewStack.length > 1) viewStack.pop();
-    fitOverview();
+    const cw = canvas.clientWidth;
+    const ch = canvas.clientHeight;
+    setCameraTarget(fitToRect(0, 0, 1, 1, cw, ch, 20));
     closeMembers();
     updateBreadcrumb();
-    draw();
-  } else if (e.key === 'd' || e.key === 'D') {
+  } else if (e.key === '`' || e.key === 'F3') {
     debugMode = !debugMode;
-    draw();
+    scheduleFrame();
+  } else if (e.key === 'Enter' || e.key === ' ') {
+    e.preventDefault();
+    if (hoveredNode) {
+      enterNode(hoveredNode);
+    }
   }
+});
+
+document.addEventListener('keyup', (e) => {
+  keysDown.delete(e.key);
+});
+
+// Blur: release all keys (e.g., alt-tab)
+window.addEventListener('blur', () => {
+  keysDown.clear();
 });
 
 // ---------------------------------------------------------------------------

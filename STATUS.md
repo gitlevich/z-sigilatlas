@@ -1,6 +1,6 @@
 # Sigil Tree - Project Status
 
-## Current Phase: 6 (ACCEPTED)
+## Current Phase: 7 (PENDING ACCEPTANCE)
 
 ## Phase 1: Corpus ingestion and artifacts (ACCEPTED)
 
@@ -152,7 +152,7 @@
 - Invariant §4.5: ESC from any depth returns to full atlas view (1 action)
 - UI live at http://127.0.0.1:8777/atlas
 
-## Phase 6: Multiscale atlas pyramid (PENDING ACCEPTANCE)
+## Phase 6: Multiscale atlas pyramid (ACCEPTED)
 
 ### Files created/modified
 - `sigiltree/atlas.py` - extended AtlasNode (level, parent_id, child_ids, is_leaf), build_sublevel_graph, compute_target_range, build_atlas_recursive, _build_level_nodes, _save_level_meta, load_atlas_manifest, get_children, _cover_crop, _best_thumb_dir, render_neighborhood_tile rewrite
@@ -216,3 +216,53 @@
 - Invariant §4.3: no sigil created during build or navigation (test passes)
 - Invariant §4.5: ESC returns up one level, Home returns to root
 - UI live at http://127.0.0.1:8777/atlas
+
+## Phase 7: Driving (continuous navigation) (PENDING ACCEPTANCE)
+
+### Files modified
+- `sigiltree/viewer_server.py` - rewrote ATLAS_VIEWER_HTML JavaScript: replaced event-driven draw() with requestAnimationFrame loop, added camera interpolation, WASD/Arrow driving, velocity-based wheel zoom, animated transitions, tile prefetching, minimap click, Enter/Space node entry, enhanced debug overlay
+
+### Architecture changes (JS only, no Python changes)
+- **Animation loop**: `scheduleFrame()` / `tick()` with self-terminating rAF; only runs while moving
+- **Camera model**: dual state `cam` (current) + `camTarget` (desired) with exponential lerp (CAM_LERP=0.15)
+- **Velocity system**: `camVel` {x, y, z} with per-axis friction; wheel and pan accumulate impulses
+- **Keyboard driving**: `keysDown` Set tracks held keys; WASD/Arrows pan, Q/E zoom continuously
+- **Animated transitions**: enterNode/exitToParent use `setCameraTarget()` for smooth zoom
+- **Direct manipulation**: mouse drag bypasses lerp, sets cam+camTarget directly for zero-latency feel
+- **Tile prefetching**: every 10 frames, scan 1.5x viewport bounds, ensureTile for uncached nodes
+- **Minimap click**: click handler maps minimap coords to world position, sets camTarget
+- **Hovered node tracking**: mousemove updates `hoveredNode` for Enter/Space keyboard entry
+
+### Key bindings (changed)
+- W/Up, S/Down, A/Left, D/Right: continuous pan
+- Q/E: continuous zoom in/out
+- Escape: exit to parent (animated)
+- Home/H: pop to root (animated)
+- Enter/Space: enter hovered node
+- Backtick/F3: toggle debug overlay (moved from D)
+- D key: now drives right (was debug toggle)
+
+### Constants
+- CAM_LERP = 0.15, DRIVE_SPEED = 8, ZOOM_KEY_FACTOR = 1.02
+- ZOOM_SENSITIVITY = 0.003, ZOOM_FRICTION = 0.85, PAN_FRICTION = 0.88
+- PREFETCH_MARGIN = 1.5, PREFETCH_INTERVAL = 10 frames
+
+### Debug overlay enhancements
+- FPS counter
+- Camera target readout
+- Velocity readout (x, y, z)
+- Active keys display
+- Hovered node info
+
+### Deferred
+- Guidance overlays (spec marks as optional): deferred
+- Tile cache eviction: 913 tiles manageable, deferred to Phase 10
+
+### Verification results
+- 81/81 tests pass (no Python changes, all existing tests unaffected)
+- Invariant §4.1: enterNode animates to parent rect (camera anchors via setCameraTarget)
+- Invariant §4.2: exitToParent is stack pop + animated restore (no network request, instant)
+- Invariant §4.3: no sigil created during driving or navigation (test passes)
+- Invariant §4.5: ESC always available, exits within 1 action
+- UI live at http://127.0.0.1:8777/atlas
+- Pending manual verification: continuous driving feel, FPS during motion, wheel momentum, transition smoothness
