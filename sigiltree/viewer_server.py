@@ -633,7 +633,7 @@ async def handle_atlas_node_doors(request: web.Request) -> web.Response:
     # Member images: expose the node's actual photographs so the client
     # can display them as clickable tiles. Works at every level, not just leaves.
     members = []
-    if parent_node and parent_node.get("size", 0) > 1:
+    if parent_node and parent_node.get("size", 0) >= 1:
         image_ids = parent_node.get("image_ids", [])
         # Batch-fetch original dimensions from DB for aspect-ratio-aware layout
         dims: dict[str, tuple[int, int]] = {}
@@ -2124,13 +2124,17 @@ function draw() {
         }
         ctx.drawImage(tc.img, 0, 0, imgW, imgH, dx, dy, dw, dh);
       } else if (node.door_type === 'member') {
-        // Member in grid: cover-fit, fill cell with minor center-crop
-        const scale = Math.max(iw / imgW, ih / imgH);
-        const sw = iw / scale;
-        const sh = ih / scale;
-        const sx = (imgW - sw) / 2;
-        const sy = (imgH - sh) / 2;
-        ctx.drawImage(tc.img, sx, sy, sw, sh, ix, iy, iw, ih);
+        // Member image: contain-fit, show full image without cropping
+        const scale = Math.min(iw / imgW, ih / imgH);
+        const dw = imgW * scale;
+        const dh = imgH * scale;
+        const dx = ix + (iw - dw) / 2;
+        const dy = iy + (ih - dh) / 2;
+        if (dw < iw || dh < ih) {
+          ctx.fillStyle = '#1a1a1a';
+          ctx.fillRect(ix, iy, iw, ih);
+        }
+        ctx.drawImage(tc.img, 0, 0, imgW, imgH, dx, dy, dw, dh);
       } else {
         // Cover-fit: fill cell completely, center-crop excess.
         // Montage grids tolerate slight cropping; no black bars.
