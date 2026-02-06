@@ -424,6 +424,27 @@ def _cover_crop(img: Image.Image, target_w: int, target_h: int) -> Image.Image:
     return img.crop((left, top, left + target_w, top + target_h))
 
 
+def _partition_into_rows(n: int) -> list[int]:
+    """Partition n images into rows for a square canvas with zero waste.
+
+    Returns list of items-per-row, e.g. [3, 3, 3] for n=9 or [3, 2] for n=5.
+    Goal: rows have nearly equal item counts, total items = n exactly.
+    """
+    import math
+    if n <= 0:
+        return []
+    if n == 1:
+        return [1]
+    # Number of rows ≈ sqrt(n) for a square grid
+    num_rows = max(1, round(math.sqrt(n)))
+    # Distribute n items across num_rows as evenly as possible
+    base = n // num_rows
+    extra = n % num_rows
+    # Rows with (base+1) items come first, then rows with base items
+    rows = [base + 1] * extra + [base] * (num_rows - extra)
+    return rows
+
+
 def render_neighborhood_tile(
     image_ids: list[str],
     tile_width: int,
@@ -434,15 +455,12 @@ def render_neighborhood_tile(
 ) -> None:
     """Render a mosaic tile for a neighborhood.
 
-    Computes grid dimensions from the image count, constraining cell
-    aspect ratio to [1:MAX_CELL_RATIO, MAX_CELL_RATIO:1] so images
-    are never cropped into unrecognizable strips.  Each cell is filled
-    using cover-crop. No image is repeated.
+    Uses a variable-row layout to fill the entire canvas with zero waste.
+    Each row spans the full width. Row heights are equal (tile_height / num_rows).
+    Within each row, images are equally spaced (row_width / items_in_row).
+    Every cell is filled using cover-crop. No image is repeated.
     """
     _ensure_heavy_imports()
-    import math
-
-    MAX_CELL_RATIO = 2.0  # cells never skinnier than 1:2
 
     n_images = len(image_ids)
     if n_images == 0:
@@ -453,64 +471,39 @@ def render_neighborhood_tile(
 
     thumb_dir, source_size = _best_thumb_dir(artifact_dir)
 
-    # Compute grid: find cols/rows that fit n_images with minimal waste,
-    # respecting tile aspect ratio AND constraining cell aspect ratio.
-    tile_aspect = tile_width / tile_height if tile_height > 0 else 1.0
-
-    best_cols, best_rows = 1, n_images
-    best_score = float("inf")
-    for c in range(1, n_images + 1):
-        r = math.ceil(n_images / c)
-        # Cell aspect ratio check: reject grids producing skinny strips
-        cell_w = tile_width / c
-        cell_h = tile_height / r
-        cell_ratio = max(cell_w, cell_h) / max(min(cell_w, cell_h), 1)
-        if cell_ratio > MAX_CELL_RATIO:
-            continue
-
-        waste = c * r - n_images
-        grid_aspect = c / r if r > 0 else 1.0
-        aspect_penalty = abs(grid_aspect - tile_aspect) / max(tile_aspect, 0.01)
-        score = waste + aspect_penalty * n_images * 0.3
-        if score < best_score:
-            best_cols, best_rows = c, r
-            best_score = score
-        if waste == 0 and aspect_penalty < 0.3:
-            break
-
-    # Fallback: if all grids were rejected (very extreme tile aspect),
-    # pick sqrt-based grid that at least keeps cells squarish
-    if best_score == float("inf"):
-        best_cols = max(1, round(math.sqrt(n_images * tile_aspect)))
-        best_rows = math.ceil(n_images / best_cols)
-
-    cols, rows = best_cols, best_rows
-
-    # Cell dimensions: divide tile evenly, last col/row absorbs remainder
-    base_cell_w = tile_width // cols
-    base_cell_h = tile_height // rows
+    row_counts = _partition_into_rows(n_images)
+    num_rows = len(row_counts)
 
     tile = Image.new("RGB", (tile_width, tile_height), color=(17, 17, 17))
 
-    # Place each image exactly once, no repetition
-    for idx, iid in enumerate(image_ids):
-        if idx >= cols * rows:
-            break
-        r, c = divmod(idx, cols)
-        # Last column/row absorbs remainder pixels
-        x = c * base_cell_w
-        y = r * base_cell_h
-        cw = (tile_width - x) if c == cols - 1 else base_cell_w
-        ch = (tile_height - y) if r == rows - 1 else base_cell_h
-        thumb_path = thumb_dir / f"{iid}.jpg"
-        if not thumb_path.exists():
-            continue
-        try:
-            thumb = Image.open(thumb_path)
-            thumb = _cover_crop(thumb, cw, ch)
-            tile.paste(thumb, (x, y))
-        except Exception as e:
-            log.warning("Failed to load thumbnail %s: %s", thumb_path, e)
+    idx = 0
+    for ri, count in enumerate(row_counts):
+        # Row vertical bounds
+        y = ri * tile_height // num_rows
+        y_next = (ri + 1) * tile_height // num_rows
+        rh = y_next - y
+
+        for ci in range(count):
+            # Cell horizontal bounds within this row
+            x = ci * tile_width // count
+            x_next = (ci + 1) * tile_width // count
+            cw = x_next - x
+
+            if idx >= n_images:
+                break
+
+            iid = image_ids[idx]
+            idx += 1
+
+            thumb_path = thumb_dir / f"{iid}.jpg"
+            if not thumb_path.exists():
+                continue
+            try:
+                thumb = Image.open(thumb_path)
+                thumb = _cover_crop(thumb, cw, rh)
+                tile.paste(thumb, (x, y))
+            except Exception as e:
+                log.warning("Failed to load thumbnail %s: %s", thumb_path, e)
 
     tile_path.parent.mkdir(parents=True, exist_ok=True)
     tile.save(str(tile_path), quality=85)
@@ -633,15 +626,10 @@ def build_atlas(
         # so render at a resolution that looks sharp at that zoom.
         tile_name = f"neighborhood_{rank:03d}.jpg"
         tile_path = tiles_dir / tile_name
-        rx, ry, rw, rh = rect
-        tile_long = 1024
-        aspect = rw / rh if rh > 0 else 1.0
-        if aspect >= 1.0:
-            tile_w = tile_long
-            tile_h = max(64, int(tile_long / aspect))
-        else:
-            tile_h = tile_long
-            tile_w = max(64, int(tile_long * aspect))
+        # Square tiles: montage images are always 1024x1024 regardless of
+        # treemap rect. The layout engine handles aspect-ratio display.
+        tile_w = 1024
+        tile_h = 1024
         render_neighborhood_tile(
             sorted_member_ids, tile_w, tile_h, artifact_dir, tile_path,
         )
@@ -799,15 +787,9 @@ def _build_level_nodes(
             # so render at a resolution that looks sharp at that zoom.
             tile_name = f"{node_id}.jpg"
             tile_path = tiles_dir / tile_name
-            rx, ry, rw, rh = rect
-            tile_long = 1024
-            aspect = rw / rh if rh > 0 else 1.0
-            if aspect >= 1.0:
-                tile_w = tile_long
-                tile_h = max(64, int(tile_long / aspect))
-            else:
-                tile_h = tile_long
-                tile_w = max(64, int(tile_long * aspect))
+            # Square tiles: montage images are always 1024x1024.
+            tile_w = 1024
+            tile_h = 1024
             render_neighborhood_tile(
                 sorted_member_ids, tile_w, tile_h, artifact_dir, tile_path,
             )

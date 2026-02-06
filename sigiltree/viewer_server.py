@@ -11,11 +11,42 @@ from sigiltree import db
 log = logging.getLogger(__name__)
 
 
+def _preheat_caches(app, artifact_dir: Path) -> None:
+    """Load all atlas metadata, ride stats, and flow graphs at startup."""
+    import time
+    start = time.perf_counter()
+
+    manifest_path = artifact_dir / "atlas" / "manifest.json"
+    if not manifest_path.exists():
+        return
+
+    manifest = json.loads(manifest_path.read_text())
+    max_level = manifest.get("max_level", 0)
+
+    # Load stats first (needed for flow graphs)
+    _cached_stats(app, artifact_dir)
+
+    # Load meta and flow graph for every level
+    for level in range(max_level + 1):
+        _cached_meta(app, artifact_dir, level)
+        _cached_flow(app, artifact_dir, level)
+
+    elapsed = (time.perf_counter() - start) * 1000
+    log.info("Cache preheated: %d levels in %.0fms", max_level + 1, elapsed)
+
+
 def create_app(artifact_dir: Path) -> web.Application:
     app = web.Application()
     app["artifact_dir"] = artifact_dir
     app["arcade_sessions"] = {}  # user_id -> ArcadeSession
     app["flythrough_sessions"] = {}  # user_id -> FlythroughSession
+    app["_flow_cache"] = {}  # level -> flow_graph
+    app["_meta_cache"] = {}  # level -> meta dict
+    app["_stats_cache"] = None  # ride stats
+
+    # Preheat caches at startup so first request is fast
+    _preheat_caches(app, artifact_dir)
+
     app.router.add_get("/", lambda r: web.HTTPFound("/atlas"))
     app.router.add_get("/nn", handle_nn_page)
     app.router.add_get("/contrasts", handle_contrasts_page)
@@ -241,10 +272,9 @@ async def handle_atlas_page(request: web.Request) -> web.Response:
 
 
 async def handle_atlas_meta(request: web.Request) -> web.Response:
-    from sigiltree.atlas import load_atlas_meta
     artifact_dir = request.app["artifact_dir"]
     level = int(request.query.get("level", "0"))
-    meta = load_atlas_meta(artifact_dir, level=level)
+    meta = _cached_meta(request.app, artifact_dir, level)
     if meta is None:
         return web.json_response({"error": "No atlas built. Run: sigiltree atlas <artifact_dir>"}, status=404)
     return web.json_response(meta)
@@ -260,10 +290,9 @@ async def handle_atlas_manifest(request: web.Request) -> web.Response:
 
 
 async def handle_atlas_level_meta(request: web.Request) -> web.Response:
-    from sigiltree.atlas import load_atlas_meta
     artifact_dir = request.app["artifact_dir"]
     level = int(request.match_info["level"])
-    meta = load_atlas_meta(artifact_dir, level=level)
+    meta = _cached_meta(request.app, artifact_dir, level)
     if meta is None:
         return web.json_response({"error": f"No atlas at level {level}"}, status=404)
     return web.json_response(meta)
@@ -484,16 +513,68 @@ async def handle_flow_neighbors(request: web.Request) -> web.Response:
     return web.json_response({"node_id": node_id, "neighbors": result})
 
 
+def _cached_meta(app, artifact_dir, level):
+    """Load atlas meta with app-level caching. Enriches nodes with tile dimensions."""
+    from sigiltree.atlas import load_atlas_meta
+    cache = app["_meta_cache"]
+    if level not in cache:
+        meta = load_atlas_meta(artifact_dir, level=level)
+        if meta:
+            _enrich_tile_dimensions(meta, artifact_dir, level)
+        cache[level] = meta
+    return cache[level]
+
+
+def _enrich_tile_dimensions(meta, artifact_dir, level):
+    """Add tile_w and tile_h to each node by reading tile image headers."""
+    from PIL import Image
+    for node in meta.get("nodes", []):
+        tile_path = node.get("tile_path", "")
+        if not tile_path:
+            continue
+        full_path = artifact_dir / "atlas" / f"level{level}" / tile_path
+        if not full_path.exists():
+            continue
+        try:
+            with Image.open(full_path) as im:
+                node["tile_w"], node["tile_h"] = im.size
+        except Exception:
+            pass
+
+
+def _cached_stats(app, artifact_dir):
+    """Load ride stats with app-level caching."""
+    from sigiltree.ride_stats import load_ride_stats
+    if app["_stats_cache"] is None:
+        app["_stats_cache"] = load_ride_stats(artifact_dir)
+    return app["_stats_cache"]
+
+
+def _cached_flow(app, artifact_dir, level):
+    """Compute flow graph with app-level caching."""
+    from sigiltree.flythrough import compute_flow_graph
+    cache = app["_flow_cache"]
+    if level not in cache:
+        stats = _cached_stats(app, artifact_dir)
+        if not stats:
+            cache[level] = {}
+            return cache[level]
+        level_zs = stats["zsummaries"].get(str(level), {})
+        meta = _cached_meta(app, artifact_dir, level)
+        if meta and level_zs:
+            node_ids = [n["node_id"] for n in meta["nodes"]]
+            cache[level] = compute_flow_graph(node_ids, level_zs)
+        else:
+            cache[level] = {}
+    return cache[level]
+
+
 async def handle_atlas_node_doors(request: web.Request) -> web.Response:
     """Return all doors for a sigil: back + down + lateral.
 
     Unified endpoint that combines children (down doors) and flow-neighbors
     (lateral doors) into a single response. Every sigil always has doors.
     """
-    from sigiltree.ride_stats import load_ride_stats
-    from sigiltree.atlas import load_atlas_meta
-    from sigiltree.flythrough import compute_flow_graph
-
     artifact_dir = request.app["artifact_dir"]
     node_id = request.match_info["node_id"]
     level = int(request.query.get("level", "0"))
@@ -505,9 +586,8 @@ async def handle_atlas_node_doors(request: web.Request) -> web.Response:
     # Back door: the sigil we came from (may be at a different level)
     if from_node:
         back_level = int(from_level) if from_level else level
-        # Search at from_level first, then same level
         for search_level in ([back_level, level] if back_level != level else [level]):
-            from_meta = load_atlas_meta(artifact_dir, level=search_level)
+            from_meta = _cached_meta(request.app, artifact_dir, search_level)
             if from_meta:
                 back_node = next(
                     (n for n in from_meta["nodes"] if n["node_id"] == from_node),
@@ -518,14 +598,14 @@ async def handle_atlas_node_doors(request: web.Request) -> web.Response:
                     break
 
     # Down doors: children of this node
-    parent_meta = load_atlas_meta(artifact_dir, level=level)
+    parent_meta = _cached_meta(request.app, artifact_dir, level)
     if parent_meta:
         parent_node = next(
             (n for n in parent_meta["nodes"] if n["node_id"] == node_id), None
         )
         if parent_node and parent_node.get("child_ids"):
             child_level = level + 1
-            child_meta = load_atlas_meta(artifact_dir, level=child_level)
+            child_meta = _cached_meta(request.app, artifact_dir, child_level)
             if child_meta:
                 children = [
                     n for n in child_meta["nodes"]
@@ -535,23 +615,17 @@ async def handle_atlas_node_doors(request: web.Request) -> web.Response:
                     doors.append({**child, "door_type": "down"})
 
     # Lateral doors: flow-neighbors at same level
-    stats = load_ride_stats(artifact_dir)
-    if stats:
-        level_zs = stats["zsummaries"].get(str(level), {})
-        meta = load_atlas_meta(artifact_dir, level=level)
-        if meta and level_zs:
+    flow = _cached_flow(request.app, artifact_dir, level)
+    if flow:
+        meta = _cached_meta(request.app, artifact_dir, level)
+        if meta:
             node_map = {n["node_id"]: n for n in meta["nodes"]}
-            node_ids = list(node_map.keys())
-            flow = compute_flow_graph(node_ids, level_zs)
             neighbors = flow.get(node_id, [])
-            seen = {d["node_id"] for d in doors}  # don't duplicate back door
+            seen = {d["node_id"] for d in doors}
             for nid in neighbors[:8]:
                 if nid not in seen:
                     n = node_map.get(nid, {})
-                    doors.append({
-                        **n,
-                        "door_type": "lateral",
-                    })
+                    doors.append({**n, "door_type": "lateral"})
 
     return web.json_response({
         "doors": doors,
@@ -1528,7 +1602,9 @@ let debugMode = false;
 // viewStack[0] is always level 0 root
 let viewStack = [];
 
-// Tile cache: node_id -> { img, loaded }
+// Tile cache: node_id -> { img, loaded, lastUsed }
+// LRU eviction keeps memory bounded.
+const TILE_CACHE_MAX = 50;
 let tileCache = {};
 
 // Level 0 nodes (for minimap)
@@ -1637,6 +1713,7 @@ function setCameraImmediate(newCam) {
   camTarget.x = newCam.x;
   camTarget.y = newCam.y;
   camTarget.zoom = newCam.zoom;
+  scheduleFrame();
 }
 
 function setCameraTarget(newCam) {
@@ -1868,15 +1945,34 @@ function tilePath(node) {
 }
 
 function ensureTile(node) {
-  if (tileCache[node.node_id]) return;
+  const cached = tileCache[node.node_id];
+  if (cached) { cached.lastUsed = performance.now(); return; }
+  evictTiles();
   const img = new window.Image();
-  tileCache[node.node_id] = { img: img, loaded: false };
+  tileCache[node.node_id] = { img: img, loaded: false, lastUsed: performance.now() };
   img.onload = () => {
     tileCache[node.node_id].loaded = true;
     scheduleFrame();
   };
   img.onerror = () => {};
   img.src = tilePath(node);
+}
+
+function evictTiles() {
+  const keys = Object.keys(tileCache);
+  if (keys.length < TILE_CACHE_MAX) return;
+  // Keep tiles visible in the current frame
+  const visible = new Set((currentNodes() || []).map(n => n.node_id));
+  // Sort by lastUsed ascending (oldest first)
+  const evictable = keys.filter(k => !visible.has(k))
+    .sort((a, b) => (tileCache[a].lastUsed || 0) - (tileCache[b].lastUsed || 0));
+  // Evict oldest half
+  const toEvict = evictable.slice(0, Math.max(1, Math.floor(evictable.length / 2)));
+  for (const k of toEvict) {
+    const tc = tileCache[k];
+    if (tc.img) { tc.img.onload = null; tc.img.src = ''; }
+    delete tileCache[k];
+  }
 }
 
 function prefetchTiles() {
@@ -1938,7 +2034,20 @@ function draw() {
     ensureTile(node);
     const tc = tileCache[node.node_id];
     if (tc && tc.loaded) {
-      ctx.drawImage(tc.img, ix, iy, iw, ih);
+      // Contain-fit: show the full image, no cropping.
+      // Cells are shaped to match tile aspect ratios, so gaps are minimal.
+      const imgW = tc.img.naturalWidth;
+      const imgH = tc.img.naturalHeight;
+      const scale = Math.min(iw / imgW, ih / imgH);
+      const dw = imgW * scale;
+      const dh = imgH * scale;
+      const dx = ix + (iw - dw) / 2;
+      const dy = iy + (ih - dh) / 2;
+      if (dw < iw || dh < ih) {
+        ctx.fillStyle = '#1a1a1a';
+        ctx.fillRect(ix, iy, iw, ih);
+      }
+      ctx.drawImage(tc.img, 0, 0, imgW, imgH, dx, dy, dw, dh);
     } else {
       ctx.fillStyle = '#1a1a1a';
       ctx.fillRect(ix, iy, iw, ih);
@@ -1985,27 +2094,47 @@ function draw() {
       ctx.strokeRect(ix + 1, iy + 1, iw - 2, ih - 2);
     }
 
-    // Door type indicators: subtle visual cues
+    // Door type indicators: colored borders showing navigation direction
     if (node.door_type === 'back') {
-      // Back door: dimmed border with return arrow
-      ctx.strokeStyle = 'rgba(180,180,180,0.4)';
-      ctx.lineWidth = Math.max(1, Math.min(3, iw * 0.008));
-      ctx.strokeRect(ix + 1, iy + 1, iw - 2, ih - 2);
-      // Small return arrow in top-left corner
+      // Back door: warm border + upward arrow
+      ctx.save();
+      const bw = Math.max(2, Math.min(4, iw * 0.012));
+      ctx.strokeStyle = 'rgba(220,180,120,0.7)';
+      ctx.lineWidth = bw;
+      ctx.strokeRect(ix + bw/2, iy + bw/2, iw - bw, ih - bw);
       if (iw > 40 && ih > 40) {
-        ctx.save();
-        ctx.fillStyle = 'rgba(200,200,200,0.6)';
-        ctx.font = `${Math.max(10, Math.min(16, iw * 0.06))}px system-ui`;
+        const iconSz = Math.max(14, Math.min(24, iw * 0.09));
+        ctx.fillStyle = 'rgba(220,180,120,0.9)';
+        ctx.font = `bold ${iconSz}px system-ui`;
         ctx.textAlign = 'left';
         ctx.textBaseline = 'top';
-        ctx.fillText('\\u21A9', ix + 4, iy + 3);
-        ctx.restore();
+        ctx.fillText('\u2191', ix + 6, iy + 4);
       }
+      ctx.restore();
+    } else if (node.door_type === 'down') {
+      // Down door: green border + downward arrow
+      ctx.save();
+      const bw = Math.max(2, Math.min(4, iw * 0.012));
+      ctx.strokeStyle = 'rgba(100,200,120,0.7)';
+      ctx.lineWidth = bw;
+      ctx.strokeRect(ix + bw/2, iy + bw/2, iw - bw, ih - bw);
+      if (iw > 40 && ih > 40) {
+        const iconSz = Math.max(14, Math.min(24, iw * 0.09));
+        ctx.fillStyle = 'rgba(100,200,120,0.9)';
+        ctx.font = `bold ${iconSz}px system-ui`;
+        ctx.textAlign = 'right';
+        ctx.textBaseline = 'bottom';
+        ctx.fillText('\u2193', ix + iw - 6, iy + ih - 4);
+      }
+      ctx.restore();
     } else if (node.door_type === 'lateral') {
-      // Lateral door: thin blue-ish border
-      ctx.strokeStyle = 'rgba(100,160,220,0.35)';
-      ctx.lineWidth = Math.max(1, Math.min(2, iw * 0.006));
-      ctx.strokeRect(ix + 1, iy + 1, iw - 2, ih - 2);
+      // Lateral door: blue border
+      ctx.save();
+      const bw = Math.max(2, Math.min(4, iw * 0.012));
+      ctx.strokeStyle = 'rgba(100,160,220,0.6)';
+      ctx.lineWidth = bw;
+      ctx.strokeRect(ix + bw/2, iy + bw/2, iw - bw, ih - bw);
+      ctx.restore();
     }
 
     // Hover highlight: bright border when mouse is over this node
@@ -2346,10 +2475,12 @@ async function init() {
       `${meta.corpus_size} images, ${meta.n_neighborhoods} neighborhoods` +
       (manifest && manifest.max_level > 0 ? `, ${manifest.max_level + 1} levels` : '');
 
-    // Push root frame
+    // Push root frame — re-layout with justified rows so tiles match
+    // image aspect ratios instead of using treemap rects
+    const rootTiles = layoutAsGrid(meta.nodes);
     viewStack = [{
       level: 0,
-      nodes: meta.nodes,
+      nodes: rootTiles,
       camera: null,
       parentNode: null,
     }];
@@ -2367,7 +2498,26 @@ async function init() {
 function fitOverview() {
   const cw = canvas.clientWidth;
   const ch = canvas.clientHeight;
-  setCameraImmediate(fitToRect(0, 0, 1, 1, cw, ch, 0));
+  // Compute tight bounding rect of all current nodes
+  const nodes = currentNodes();
+  if (nodes.length === 0) return;
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  for (const n of nodes) {
+    if (n.rect[0] < minX) minX = n.rect[0];
+    if (n.rect[1] < minY) minY = n.rect[1];
+    const ex = n.rect[0] + n.rect[2];
+    const ey = n.rect[1] + n.rect[3];
+    if (ex > maxX) maxX = ex;
+    if (ey > maxY) maxY = ey;
+  }
+  const bw = maxX - minX;
+  const bh = maxY - minY;
+  // Force square bounding box so the grid is always compact and centered.
+  // Content is centered within the square; fitToRect centers the square in viewport.
+  const side = Math.max(bw, bh);
+  const sx = minX - (side - bw) / 2;
+  const sy = minY - (side - bh) / 2;
+  setCameraImmediate(fitToRect(sx, sy, side, side, cw, ch, 0));
 }
 
 function hitTest(sx, sy) {
@@ -2389,6 +2539,9 @@ function hitTest(sx, sy) {
 }
 
 async function enterNode(node) {
+  // Don't re-enter the room we're already in
+  if (node.door_type === 'self') return;
+
   // Silent calibration: record every node entry
   recordFlythroughVisit(node);
 
@@ -2409,17 +2562,35 @@ async function enterNode(node) {
   const hasDown = data.doors.some(d => d.door_type === 'down');
   const frameLevel = hasDown ? level + 1 : level;
 
-  // Layout doors as a grid of tiles
-  const doorTiles = layoutAsGrid(data.doors);
+  // Unified grid layout. For single-image nodes, the image itself joins
+  // the grid as a weighted tile so it dominates the first row.
+  let frameTiles;
+  if (node.size === 1) {
+    const selfTile = {
+      node_id: node.node_id,
+      level: node.level,
+      is_leaf: false,
+      size: node.size || 0,
+      tile_path: node.tile_path || '',
+      door_type: 'self',
+      child_ids: node.child_ids,
+      tile_w: node.tile_w,
+      tile_h: node.tile_h,
+      _layout_weight: Math.max(2.0, data.doors.length * 0.6),
+    };
+    frameTiles = layoutAsGrid([selfTile, ...data.doors]);
+  } else {
+    frameTiles = layoutAsGrid(data.doors);
+  }
 
   viewStack.push({
     level: frameLevel,
-    nodes: doorTiles,
+    nodes: frameTiles,
     camera: null,
     parentNode: node,
   });
 
-  // Snap camera to fit the door grid (always [0,0,1,1])
+  // Snap camera to fit the door grid (fills viewport)
   fitOverview();
 
   updateBreadcrumb();
@@ -2434,20 +2605,95 @@ async function enterNode(node) {
 }
 
 function layoutAsGrid(doors) {
+  // Justified row layout producing a roughly square grid.
+  //
+  // Algorithm:
+  // 1. Compute clamped aspect ratios (with layout weight support).
+  // 2. Greedy row partition targeting equal row aspect sums.
+  // 3. Balanced last row: if too sparse, merge with previous row.
+  // 4. fitOverview forces square bounding box and centers in viewport.
   const n = doors.length;
   if (n === 0) return [];
-  const cols = Math.ceil(Math.sqrt(n));
-  const rows = Math.ceil(n / cols);
-  return doors.map((d, i) => ({
-    node_id: d.node_id,
-    rect: [(i % cols) / cols, Math.floor(i / cols) / rows, 1 / cols, 1 / rows],
-    level: d.level,
-    is_leaf: false,
-    size: d.size || 0,
-    tile_path: d.tile_path || '',
-    door_type: d.door_type,
-    child_ids: d.child_ids,
-  }));
+
+  const ASPECT_MIN = 0.75;
+  const ASPECT_MAX = 1.5;
+  const aspects = doors.map(d => {
+    const tw = d.tile_w || 1;
+    const th = d.tile_h || 1;
+    const natural = Math.max(ASPECT_MIN, Math.min(ASPECT_MAX, tw / th));
+    const weight = d._layout_weight || 1.0;
+    return natural * weight;
+  });
+
+  const worldW = 1.0;
+  const totalAspect = aspects.reduce((s, a) => s + a, 0);
+
+  // Target: square grid. With k equal rows: totalH = k^2/totalAspect = worldW.
+  // So k = sqrt(totalAspect).
+  const idealRows = Math.max(1, Math.round(Math.sqrt(totalAspect)));
+  const targetRowAspect = totalAspect / idealRows;
+
+  // Greedy partition
+  const rows = [];
+  let rowStart = 0;
+  let rowAspectSum = 0;
+  for (let i = 0; i < n; i++) {
+    rowAspectSum += aspects[i];
+    const remaining = n - i - 1;
+    const rowsLeft = idealRows - rows.length - 1;
+    if (rowAspectSum >= targetRowAspect && rowsLeft > 0 && remaining >= rowsLeft) {
+      rows.push({ start: rowStart, end: i + 1, aspectSum: rowAspectSum });
+      rowStart = i + 1;
+      rowAspectSum = 0;
+    }
+  }
+  if (rowStart < n) {
+    rows.push({ start: rowStart, end: n, aspectSum: rowAspectSum });
+  }
+
+  // Balance: if last row aspect sum is less than half the target,
+  // merge it with the previous row to prevent a disproportionately tall last row.
+  while (rows.length > 1) {
+    const last = rows[rows.length - 1];
+    if (last.aspectSum < targetRowAspect * 0.5) {
+      const prev = rows[rows.length - 2];
+      prev.end = last.end;
+      prev.aspectSum += last.aspectSum;
+      rows.pop();
+    } else {
+      break;
+    }
+  }
+
+  // Compute world coordinates. Each row height = worldW / rowAspectSum.
+  const rowHeights = rows.map(r => r.aspectSum > 0 ? worldW / r.aspectSum : 0.1);
+
+  const result = [];
+  let y = 0;
+  for (let ri = 0; ri < rows.length; ri++) {
+    const row = rows[ri];
+    const rh = rowHeights[ri];
+    let x = 0;
+    for (let i = row.start; i < row.end; i++) {
+      const d = doors[i];
+      const tileW = (aspects[i] / row.aspectSum) * worldW;
+      result.push({
+        node_id: d.node_id,
+        rect: [x, y, tileW, rh],
+        level: d.level,
+        is_leaf: false,
+        size: d.size || 0,
+        tile_path: d.tile_path || '',
+        door_type: d.door_type,
+        child_ids: d.child_ids,
+        tile_w: d.tile_w,
+        tile_h: d.tile_h,
+      });
+      x += tileW;
+    }
+    y += rh;
+  }
+  return result;
 }
 
 function exitToParent() {

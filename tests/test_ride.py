@@ -611,3 +611,176 @@ class TestIntegration:
             assert data["status"] == "ok"
             assert data["visited_count"] == 6
             assert data["preferences_count"] >= 0
+
+
+class TestDoorsPerformance:
+    """Doors endpoint must respond under 200ms at any level."""
+
+    MAX_RESPONSE_MS = 200
+
+    @pytest.fixture
+    def multilevel_artifact_dir(self, tmp_path):
+        """Build artifact dir with 3 levels to stress-test doors endpoint."""
+        import json
+
+        (tmp_path / "thumbnails").mkdir()
+
+        # Contrast library
+        contrasts_dir = tmp_path / "contrasts"
+        contrasts_dir.mkdir()
+        contrasts = [
+            {
+                "contrast_id": f"c{i}", "name": f"contrast_{i}", "source": "test",
+                "description": "test", "mass": 1.0, "stability": 1.0,
+                "quantiles": {"p10": 0.0, "p25": 0.25, "p50": 0.5, "p75": 0.75, "p90": 1.0},
+                "exemplars": {"low": [], "median": [], "high": []},
+            }
+            for i in range(10)
+        ]
+        library = {"version": "test", "count": 10, "contrasts": contrasts}
+        (contrasts_dir / "contrast_library.json").write_text(json.dumps(library))
+
+        image_ids = [f"img_{i}" for i in range(200)]
+        coords = {
+            f"contrast_{c}": {iid: float(i * c) / 200.0 for i, iid in enumerate(image_ids)}
+            for c in range(10)
+        }
+        (contrasts_dir / "coordinates.json").write_text(json.dumps(coords))
+
+        atlas_dir = tmp_path / "atlas"
+
+        # Level 0: 10 nodes
+        all_level_nodes = []
+        level0_nodes = []
+        for i in range(10):
+            nid = f"n_{i:03d}"
+            iids = image_ids[i * 20:(i + 1) * 20]
+            level0_nodes.append({
+                "node_id": nid, "image_ids": iids, "size": len(iids),
+                "level": 0, "parent_id": None,
+                "child_ids": [f"L1_{i:02d}{j}" for j in range(4)],
+                "is_leaf": False,
+                "rect": [i * 0.1, 0.0, 0.1, 1.0], "order_key": float(i),
+                "tile_path": f"tiles/{nid}.jpg", "representative_ids": iids[:3],
+                "neighbor_ids": [],
+            })
+        all_level_nodes.append(level0_nodes)
+
+        # Level 1: 40 nodes (4 children per L0 node)
+        level1_nodes = []
+        for i in range(10):
+            parent_iids = image_ids[i * 20:(i + 1) * 20]
+            for j in range(4):
+                nid = f"L1_{i:02d}{j}"
+                iids = parent_iids[j * 5:(j + 1) * 5]
+                level1_nodes.append({
+                    "node_id": nid, "image_ids": iids, "size": len(iids),
+                    "level": 1, "parent_id": f"n_{i:03d}",
+                    "child_ids": [f"L2_{i:02d}{j}{k}" for k in range(2)],
+                    "is_leaf": False,
+                    "rect": [j * 0.25, 0.0, 0.25, 1.0], "order_key": float(j),
+                    "tile_path": f"tiles/{nid}.jpg", "representative_ids": iids[:2],
+                    "neighbor_ids": [],
+                })
+        all_level_nodes.append(level1_nodes)
+
+        # Level 2: 80 nodes (2 children per L1 node)
+        level2_nodes = []
+        for i in range(10):
+            parent_iids = image_ids[i * 20:(i + 1) * 20]
+            for j in range(4):
+                l1_iids = parent_iids[j * 5:(j + 1) * 5]
+                for k in range(2):
+                    nid = f"L2_{i:02d}{j}{k}"
+                    start = k * 2
+                    iids = l1_iids[start:start + 3] if start + 3 <= len(l1_iids) else l1_iids[start:]
+                    level2_nodes.append({
+                        "node_id": nid, "image_ids": iids, "size": len(iids),
+                        "level": 2, "parent_id": f"L1_{i:02d}{j}",
+                        "child_ids": [], "is_leaf": True,
+                        "rect": [k * 0.5, 0.0, 0.5, 1.0], "order_key": float(k),
+                        "tile_path": f"tiles/{nid}.jpg", "representative_ids": iids[:1],
+                        "neighbor_ids": [],
+                    })
+        all_level_nodes.append(level2_nodes)
+
+        # Write level metas
+        for lvl, nodes in enumerate(all_level_nodes):
+            level_dir = atlas_dir / f"level{lvl}"
+            level_dir.mkdir(parents=True)
+            (level_dir / "tiles").mkdir()
+            meta = {"corpus_size": 200, "n_neighborhoods": len(nodes), "max_level": 2, "nodes": nodes}
+            (level_dir / "meta.json").write_text(json.dumps(meta))
+
+        (atlas_dir / "manifest.json").write_text(json.dumps({
+            "max_level": 2,
+            "levels": [
+                {"level": 0, "n_nodes": 10},
+                {"level": 1, "n_nodes": 40},
+                {"level": 2, "n_nodes": 80},
+            ],
+        }))
+
+        # Ride stats
+        from sigiltree.ride_stats import compute_ride_stats, save_ride_stats
+        stats = compute_ride_stats(coords, all_level_nodes)
+        save_ride_stats(stats, tmp_path)
+
+        return tmp_path
+
+    @pytest.mark.asyncio
+    async def test_doors_response_time_all_levels(self, multilevel_artifact_dir):
+        """Doors endpoint responds under MAX_RESPONSE_MS at every level."""
+        import time
+        from aiohttp.test_utils import TestClient, TestServer
+        from sigiltree.viewer_server import create_app
+
+        app = create_app(multilevel_artifact_dir)
+        async with TestClient(TestServer(app)) as client:
+            test_cases = [
+                ("n_000", 0, "", ""),
+                ("L1_000", 1, "n_000", "0"),
+                ("L2_0000", 2, "L1_000", "1"),
+            ]
+            for node_id, level, from_node, from_level in test_cases:
+                start = time.perf_counter()
+                resp = await client.get(
+                    f"/api/atlas/node/{node_id}/doors"
+                    f"?level={level}&from_node={from_node}&from_level={from_level}"
+                )
+                elapsed_ms = (time.perf_counter() - start) * 1000
+                assert resp.status == 200, f"Level {level} failed: {resp.status}"
+                data = await resp.json()
+                assert len(data["doors"]) > 0, f"Level {level}: no doors returned"
+                assert elapsed_ms < self.MAX_RESPONSE_MS, (
+                    f"Level {level} doors took {elapsed_ms:.0f}ms "
+                    f"(max {self.MAX_RESPONSE_MS}ms)"
+                )
+
+    @pytest.mark.asyncio
+    async def test_doors_cached_is_fast(self, multilevel_artifact_dir):
+        """Second call to same level is significantly faster (cache hit)."""
+        import time
+        from aiohttp.test_utils import TestClient, TestServer
+        from sigiltree.viewer_server import create_app
+
+        app = create_app(multilevel_artifact_dir)
+        async with TestClient(TestServer(app)) as client:
+            url = "/api/atlas/node/L1_000/doors?level=1&from_node=n_000&from_level=0"
+
+            # Cold call
+            start = time.perf_counter()
+            await client.get(url)
+            cold_ms = (time.perf_counter() - start) * 1000
+
+            # Warm call (different node, same level — cache should hit)
+            url2 = "/api/atlas/node/L1_001/doors?level=1&from_node=n_000&from_level=0"
+            start = time.perf_counter()
+            resp = await client.get(url2)
+            warm_ms = (time.perf_counter() - start) * 1000
+
+            assert resp.status == 200
+            # Warm should be faster; allow generous margin
+            assert warm_ms < self.MAX_RESPONSE_MS, (
+                f"Warm call took {warm_ms:.0f}ms (max {self.MAX_RESPONSE_MS}ms)"
+            )

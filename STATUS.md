@@ -1,6 +1,46 @@
 # Sigil Tree - Project Status
 
-## Current Phase: 11 (IN PROGRESS)
+## Current Phase: Post-11 fixes, preparing Phase 12
+
+## Session Recovery Context (2026-02-06)
+
+### What just happened
+- **Zero-waste montage tiles**: Rewrote `render_neighborhood_tile()` in atlas.py. Old grid algorithm (CxR with MAX_CELL_RATIO=2.0) wasted 25-57% of canvas as black space. New algorithm uses `_partition_into_rows(n)` which distributes N images across ~sqrt(N) rows with variable items-per-row, producing exactly zero wasted cells for any N. Canvas is 100% filled.
+- **Self-similar grid layout**: Every view at every level is a square grid of square tiles. `layoutAsGrid()` with greedy row partition, aspect clamping [0.75, 1.5]. All tiles 1024x1024. `fitOverview()` forces square bounding box.
+- **Door type indicators enhanced**: Back doors have warm/amber border + ↑ arrow. Down doors have green border + ↓ arrow. Lateral doors have blue border. Visible at all tile sizes.
+- **Tile cache increased**: TILE_CACHE_MAX raised from 30 to 50 (L0 has 35 tiles).
+- **Unified layout**: One code path (`layoutAsGrid`) for ALL views including size===1 nodes.
+- Contain-fit rendering. All 184 tests pass.
+- Running against `artifacts` (250 images, 35 neighborhoods, 4 levels).
+- Atlas rebuilt with zero-waste tiles (4.5s build time).
+- Ready for Fly.io deploy.
+
+### Previous: Individual image "room" view (DELETED)
+- `layoutImageRoom()` was deleted — it wasted 12% of screen on a door column.
+- Replaced by unified grid: main image is a weighted tile in `layoutAsGrid`.
+
+### Key files
+- `sigiltree/viewer_server.py` — ALL code (server + HTML/CSS/JS inline, ~2800+ lines)
+- `sigiltree/flythrough.py` — flow graph computation (pure Python, no I/O)
+- `tests/test_doors.py` — 30 graph behavior tests
+- `tests/test_flythrough.py` — flythrough/calibration tests
+- Server startup: `uv run sigiltree serve artifacts --port 8888`
+- Deploy: `fly deploy` from project root
+
+### Architecture
+- aiohttp server, single file, all JS/CSS inline in raw Python string
+- Atlas: L0 (35 nodes) → L1 (74) → L2 (120) → L3 (25 leaves). 250 images total.
+- Every node is a sigil with doors (back/down/lateral). No dead ends.
+- Doors endpoint: `GET /api/atlas/node/{id}/doors?level=N&from_node=X&from_level=Y`
+- Tile images: montage composites at higher levels, single images at leaf level
+- Camera locked to viewport, no pan/zoom/scroll, click-only navigation
+- Floating toolbar: Back, Home, Explore, Sigil, Help
+- Justified row layout: `layoutAsGrid()` respects each tile's aspect ratio
+- Contain-fit rendering: `Math.min` scale, full image, no cropping
+
+### Pending Phase 12
+- User wants: "a switch in which this graph is going to be reconfigured by the taste sigil collected while exploring"
+- Sigil-reconfigured graph: after flythrough calibration, the graph reorders/reshapes based on inferred preferences
 
 ## Phase 11: The Sigil Graph — No Leaves, No Dead Ends (COMPLETE)
 
@@ -64,8 +104,51 @@
 - No drag panning, no zoom, no scroll — only click-to-enter
 - 152/152 tests pass
 
+### Post-Phase 11 fixes
+
+#### Graph behavior tests (test_doors.py) — 30 tests
+- Built comprehensive 4-level atlas fixture (L0: 4, L1: 8, L2: 16, L3: 32 leaves, 128 images)
+- TestNoDeadEnds (5), TestBackDoor (5), TestDownDoors (3), TestLateralDoors (4)
+- TestGraphNavigability (4), TestDoorStructure (4), TestFlowGraphProperties (5)
+- All 184 tests pass (154 existing + 30 new)
+
+#### Browser performance fix: LRU tile eviction
+- Root cause: tile cache never evicted, 1024px tiles decode to ~2.7MB RGBA each
+- After 53 tiles: 138MB decoded memory, causing browser GC jank
+- Fix: `TILE_CACHE_MAX = 30`, `evictTiles()` evicts oldest half of non-visible tiles
+- Result: memory stabilizes at ~54MB (22 tiles) after 7+ door navigations
+- enterNode timing: consistent 53ms per click
+
+#### Door type visual indicators — redesigned
+- **Back door**: warm gradient band at top + upward arrow icon (previously broken Unicode escape)
+- **Down door**: green gradient band at bottom + downward arrow icon (previously no indicator)
+- **Lateral door**: blue accent bar on left edge (previously thin blue border, hard to see)
+
+#### Click delay fix: missing scheduleFrame
+- Root cause: `setCameraImmediate()` set camera without scheduling a redraw
+- `enterNode()` -> `fitOverview()` -> `setCameraImmediate()` — no `scheduleFrame()` call
+- Canvas only redrawed when mousemove triggered `scheduleFrame()`
+- User symptom: "click waits, but click-and-move loads right away"
+- Fix: added `scheduleFrame()` at end of `setCameraImmediate()`
+
+#### Image presentation: justified row layout with aspect-ratio-aware cells
+- Principle: NO CROPPING. This app is about images — show them in their natural proportions.
+- Server-side: `_enrich_tile_dimensions()` reads tile image headers at cache time, adds `tile_w`/`tile_h` to each node.
+- Client-side: `layoutAsGrid()` replaced with justified row algorithm:
+  - Each tile's aspect ratio (tile_w/tile_h) determines its cell width relative to row height.
+  - Rows fill the full viewport width. Items per row chosen to balance row heights.
+  - World coordinates are [0, 0, viewAspect, totalHeight]; `fitOverview()` computes bounds from actual nodes.
+- Rendering: contain-fit (`Math.min` scale) — full image, centered, dark background only if tiny mismatch.
+- Result: Wide images are wide, tall images are tall, montages fill their natural shape. Zero cropping.
+
+#### Deployments
+- First deploy to Fly.io: https://sigilatlas.fly.dev/ (Phase 11 + performance fixes + door indicators + click fix)
+- Second deploy: grid layout fix (viewport-filling tiles, contain-fit)
+- Third deploy: viewport-proportional grid + contain-fit rendering
+- Fourth deploy: justified row layout with aspect-ratio-aware cells, zero cropping
+- Fifth deploy: individual image "room" view (image fills screen + door strip on left)
+
 ### Deferred
-- Deploy to Fly.io
 - Update README / landing page
 
 ## Phase 1: Corpus ingestion and artifacts (ACCEPTED)
@@ -580,4 +663,48 @@
 
 ### Deferred
 - Update README and create landing page to explain "neighborhood is a sigil" vision
-- Deploy updated app to Fly.io
+
+## Phase 11: The Sigil Graph — No Leaves, No Dead Ends (COMPLETE)
+
+### Conceptual shift
+- Every node is a sigil with doors. No dead ends. Self-similar at every level.
+- Doors: back (where you came from), down (children), lateral (flow-neighbors)
+- No keyboard navigation. Click-only. Camera locked to 100% viewport.
+- Floating toolbar: Back, Home, Explore, Sigil, Help
+
+### Files modified
+- `sigiltree/viewer_server.py` — doors endpoint, camera lock, cover-crop tile drawing, server-side caching, cache preheating
+
+### Performance fixes
+- Server-side caching: `_cached_meta()`, `_cached_stats()`, `_cached_flow()` avoid recomputation
+- Cache preheating: `_preheat_caches()` runs at startup, loads all levels
+- Cover-crop drawing: 9-argument `ctx.drawImage` eliminates image distortion
+- Camera lock: zero-padding `fitToRect`, no lerp, no velocity, no animation
+- Flow graph: O(N^2) per level but cached — computed once at startup
+- L3 verified: 25 nodes, 33 contrasts, flow graph in 1.5ms, 9 doors returned in 50ms
+
+### Performance tests
+- `TestDoorsPerformance` in `tests/test_ride.py`
+- `test_doors_response_time_all_levels`: all levels respond < 200ms
+- `test_doors_cached_is_fast`: warm cache < 200ms
+
+### Verified
+- L3 doors endpoint returns 9 doors (1 back + 8 lateral) in 50ms on production
+- No dead ends at any level — lateral doors always present
+- Camera locked: no zoom, pan, or scroll
+- Cover-crop: no image distortion
+- 154/154 tests pass
+- Deployed to https://sigilatlas.fly.dev/
+
+### Note on cold start
+- Fly.io scales to zero when idle. First request after cold start takes ~8s (container boot + Python startup + cache preheat). Subsequent requests are fast (<50ms).
+
+### Graph behavior tests: `tests/test_doors.py` (30 tests)
+- TestNoDeadEnds (5): root has doors, mid-level has doors, leaf has lateral doors, exhaustive every-node check, back door always provides way out
+- TestBackDoor (5): present when from_node specified, absent without from_node, cross-level, same-level lateral, not duplicated in lateral
+- TestDownDoors (3): match children, at next level, leaf has none
+- TestLateralDoors (4): same level, max 8, from flow graph, exclude self
+- TestGraphNavigability (4): can always go back, lateral forms cycle, all L3 reachable, down-then-back identity
+- TestDoorStructure (4): required fields, all types present, no duplicates, nonexistent node safe
+- TestFlowGraphProperties (5): complete graph, symmetric reachability, stable ordering, empty zsummaries, single contrast
+- All 184 tests pass (154 existing + 30 new)
