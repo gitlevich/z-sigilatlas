@@ -8,7 +8,7 @@ Sigil Atlas applies this language to visual perception. The definitions below ar
 
 ## Frame
 
-A frame is everything you observe right now. Not a flat snapshot — it has depth in time. When you look at a photograph, your frame includes its color, its composition, its texture, what it reminds you of, and how it makes you feel. All at once.
+A frame is everything you observe right now. When you look at a photograph, your frame includes its color, its composition, its texture, what it reminds you of, and how it makes you feel.
 
 ## Contrast
 

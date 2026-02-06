@@ -14,51 +14,49 @@
 
 ## What is this
 
-Sigil Atlas is a tool for learning to see what you're already looking at.
+Sigil Atlas organizes a collection of photographs into a zoomable map based on visual similarity. Images are placed near the ones they most resemble — not by subject or category, but by what they look and feel like.
 
-Photographs have properties you respond to before you can name them. Warm or cool. Tight or loose. Dense or sparse. Still or restless. You feel these things instantly, but the vocabulary for talking about them barely exists — and the tools for measuring them don't exist at all.
+The tool also lets you measure and record your own visual preferences along specific axes (warm–cool, sharp–soft, simple–complex, and others). The recorded preferences form a **sigil** — a sparse vector that can be projected onto the map as a brightness overlay.
 
-This project builds that vocabulary and those tools.
-
-We call it **[attention language](https://sigilsnotspells.com)**: a way of describing visual preference that's precise enough to compute with but honest enough to respect what remains unknown.
+The vocabulary for this comes from **[attention language](https://sigilsnotspells.com)**, a way of describing visual preference precisely enough to compute with.
 
 ## How it works
 
-Sigil Atlas takes a collection of photographs and organizes them into a zoomable map. Images are placed near the ones they most resemble — not by subject or category, but by what they *look and feel like*. Three kinds of visual similarity are fused together:
+Three kinds of visual similarity are fused together:
 
 - **Semantic** — what things mean (a bridge, a face, a forest)
 - **Structural** — how things are composed (symmetry, depth, negative space)
 - **Textural** — what surfaces feel like (grain, sharpness, color temperature)
 
-Where all three agree, the groupings are strong. Similar images cluster into neighborhoods; neighborhoods nest into larger regions. The result is a four-level hierarchy you can zoom through, from a bird's-eye overview down to individual photographs.
+Where all three agree, the groupings are strong. Similar images cluster into neighborhoods; neighborhoods nest into larger regions. The result is a four-level hierarchy you can zoom through.
 
 ## What you can do with it
 
 ### Navigate
 
-Click any neighborhood to zoom in. Press Escape to zoom back out. Pan with WASD or drag. Scroll to zoom. Press H to return to the top. The map is always the same shape — it never rearranges itself.
+Click any neighborhood to zoom in. Press Escape to zoom back out. Pan with WASD or drag. Scroll to zoom. Press H to return to the top. The map layout is fixed — it does not rearrange.
 
 ### Calibrate
 
-Press R to start a **contrast ride**. The system walks you through the atlas along one visual axis — warm to cool, sharp to soft, simple to complex — and asks which direction you prefer. Your answers are voluntary and explicit: you choose "more like this," "less like this," or skip. Skipping records nothing. There is no passive tracking.
+Press R to start a **contrast ride**. The system walks you through the atlas along one visual axis and asks which direction you prefer. You choose "more like this," "less like this," or skip. Skipping records nothing.
 
 ### Build a sigil
 
-Your calibration choices accumulate into a **sigil** — a personal vector of aesthetic biases. Press G to project it onto the atlas: neighborhoods aligned with your preferences brighten; others dim. The atlas topology stays fixed. Only the lighting changes.
+Your choices accumulate into a **sigil**. Press G to project it onto the atlas: neighborhoods aligned with your preferences brighten; others dim. The map stays the same; the brightness changes.
 
-A sigil is not a profile. It records only what you have explicitly chosen to collapse. Axes you haven't ridden remain in **superposition** — they are not zero, they are unmeasured.
+Axes you haven't ridden remain in **superposition** — they are not zero, they are unmeasured. The [attention language reference](docs/attention-language.md) explains this distinction and the rest of the vocabulary.
 
 ## Why
 
-Most recommendation systems watch what you do and infer what you want. They profile passively, optimize for engagement, and flatten taste into a consumption pattern.
+Photographs have properties that are easy to respond to but hard to talk about. Warm or cool. Dense or sparse. Still or restless. There is no standard vocabulary for these properties and no standard way to measure preference along them.
 
-Attention language works the other way around. It gives you a vocabulary for your own visual preferences — axes you can name, ride, and collapse on your own terms. Nothing is measured until you choose to measure it. Nothing is inferred. The goal is not to predict what you'll look at next, but to help you understand what you've been looking at all along.
+Sigil Atlas is an attempt to build both. Preference is recorded only from explicit choices — never inferred from viewing behavior. Unmeasured axes stay unmeasured. Correlated axes are disclosed, not hidden.
 
 **[Read the full attention language reference](docs/attention-language.md)** for the vocabulary, principles, and mechanics.
 
 ## Try it
 
-**[Open the live atlas](https://sigilatlas.fly.dev)** — 250 photographs from San Francisco, organized into 35 neighborhoods across 4 levels. Click to explore, press R to ride a contrast, press G to see your sigil.
+**[Open the live atlas](https://sigilatlas.fly.dev)** — 250 photographs from San Francisco, organized into 35 neighborhoods across 4 levels.
 
 ## Run your own
 
