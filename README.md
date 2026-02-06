@@ -1,5 +1,9 @@
 # SigilAtlas
 
+<p align="center">
+  <img src="docs/banner.jpg" alt="SigilAtlas — sample corpus neighborhoods" width="600">
+</p>
+
 A local-first tool for exploring image corpora through personal aesthetic preference.
 
 SigilAtlas ingests a folder of images, computes multiple embedding families (semantic, structural, texture), discovers contrasts that actually exist in the corpus, and builds a multiscale zoomable atlas — a rectangular mosaic of neighborhoods you can drive through continuously.
