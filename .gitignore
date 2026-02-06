@@ -13,10 +13,14 @@ artifacts/
 .vscode/
 .idea/
 .cursor/
+.claude/
 
 # Environment
 .venv/
 .env
+
+# Source images (large originals)
+images/
 
 # OS
 .DS_Store
