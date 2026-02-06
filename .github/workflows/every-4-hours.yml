@@ -1,0 +1,11 @@
+name: Scheduled Run
+on:
+  schedule:
+    - cron: "0 */4 * * *"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Run placeholder
+        run: echo "Workflow triggered at $(date)"
