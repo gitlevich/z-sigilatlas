@@ -1,6 +1,6 @@
 # Sigil Tree - Project Status
 
-## Current Phase: 8 (ACCEPTED)
+## Current Phase: 9 (VERIFICATION COMPLETE)
 
 ## Phase 1: Corpus ingestion and artifacts (ACCEPTED)
 
@@ -323,3 +323,111 @@
 - Invariant 4.3: sigil file MD5 unchanged after browsing (6803425b0275465d24e4b238b3c318f3)
 - Invariant 4.5: ESC always available, no added friction
 - UI live at http://127.0.0.1:8777/atlas
+
+## Phase 9: Contrast rides with drift policy (ACCEPTED)
+
+### Files created/modified
+- `sigiltree/ride_stats.py` - **NEW**: precompute per-node z-summaries + inter-contrast Pearson correlations
+- `sigiltree/ride_engine.py` - **NEW**: ride planning with drift policy cascade (single/condition/compound/reject)
+- `sigiltree/ride_session.py` - **NEW**: ride state tracking, band construction, sigil merging
+- `sigiltree/cli.py` - added `ride-stats` subcommand
+- `sigiltree/viewer_server.py` - 5 new endpoints + full ride UI in ATLAS_VIEWER_HTML
+- `tests/test_ride.py` - **NEW**: 28 tests (5 stats + 7 engine + 9 session + 2 merge + 1 lock_set + 2 drift + 2 integration)
+
+### Algorithm: Drift Policy Cascade
+- **Single**: all locked contrast drifts < tolerance (2.0 z-score) -> ride proceeds normally
+- **Condition**: restrict path to nodes where drifting contrast z_mean is within median +/- band_width/2; must retain >= min_path_length nodes
+- **Compound**: promote to two-axis ride (show user both contrasts); only if exactly 1 drifter
+- **Reject**: cannot isolate contrast; honest explanation shown to user
+
+### Tolerance tuning
+- Original tolerance=0.5: with 10 collapsed contrasts, ALL 36 contrasts rejected (inter-contrast correlations cause universal drift)
+- Tested values: 0.5 (0 rideable), 1.0 (4), 1.5 (17), 2.0 (27), 2.5 (36)
+- Selected tolerance=2.0: 27 rideable (10 single + 10 condition + 7 compound), 9 rejected — good balance of availability vs. honesty
+
+### Precomputation: `ride-stats` CLI
+- Computes per-node z_mean/z_std for all 36 contrasts across all 4 atlas levels
+- Computes 36x36 Pearson correlation matrix across all contrasts
+- 36 contrasts x 913 nodes = ~33K z-computations, under 1 second
+- Artifacts: `atlas/node_zsummaries.json`, `atlas/contrast_correlations.json`
+
+### Ride Engine: `ride_engine.py`
+- `RidePlan` dataclass: ride_contrast, resolution, path (sorted node_ids), locked, drift_estimates, condition_info, compound_info, reject_reason
+- `plan_ride()`: sort nodes by z_mean, compute drift per locked contrast, apply cascade
+- `derive_lock_set()`: all collapsed contrasts in sigil except ride contrast
+- `compute_ride_drift_at_position()`: runtime drift monitoring at any path position
+
+### Ride Session: `ride_session.py`
+- `RideSession` class: manages path traversal, records choices (approach/retreat/silence)
+- `build_band()`: approach->right, retreat->left, silence->ignored; majority wins, strength = n_agreements/n_directional
+- `merge_band_into_sigil()`: combines ride band into existing sigil, handles same/opposing directions, returns new dict (no mutation)
+
+### API Endpoints (5 new routes)
+- `POST /api/ride/plan` - plan ride from user sigil + contrast selection
+- `POST /api/ride/step` - current node, drift readings, progress
+- `POST /api/ride/choose` - record direction, advance; on completion merges band into sigil
+- `GET /api/ride/summary` - session state + band outcome
+- `GET /api/ride/stats` - debug: zsummaries + correlations
+
+### Ride UI (ATLAS_VIEWER_HTML)
+- **R key**: opens contrast picker overlay listing all 36 contrasts, collapsed ones highlighted amber
+- **Resolution consent**: single (proceed), compound (show both axes?), condition (restricted N nodes), reject (honest explanation)
+- **Ride controls** (override drive keys during ride): Right=more like this, Left=less like this, Space=skip, ESC=abort
+- **Camera animation**: setCameraTarget to current ride node per step; snap-reset on completion/abort
+- **Drift monitor**: top-right panel with per-locked-contrast drift bars (green/yellow/red)
+- **Progress bar**: bottom bar with spatial layout: `Left = less like this | [pole_low] ━━━ [pole_high] | N/total | Right = more like this | Space=skip ESC=abort`
+- **Completion overlay**: band direction + strength, agreement counts, sigil update status
+- **RIDE badge**: amber header badge during active ride
+- **Sigil overlay suppression**: sigil dimming/halos automatically hidden during ride to avoid visual conflict; resumes on ride end
+
+### Semantic pole labels (`ridePoleLabels()`)
+- Bipolar `sem_X_vs_Y` -> LOW=X, HIGH=Y (e.g., "bw" / "color")
+- Unipolar `sem_X` -> "less X" / "more X" (e.g., "less street" / "more street")
+- Perceptual -> "less name" / "more name" (e.g., "less brightness" / "more brightness")
+- PCA -> "LOW" / "HIGH" (no semantic meaning available)
+- Applied in consent screens, progress bar, and completion overlay
+
+### Camera snap fix
+- After ride completion or abort, camera must return to atlas overview
+- Original approach (setCameraTarget with lerp) failed: animation from deep zoom to overview takes too many frames
+- Fix: snap both `cam` and `camTarget` directly to overview coordinates (no animation)
+- viewStack also reset to root level
+
+### Node labels (atlas neighborhoods)
+- `/api/atlas/node_labels?level=N` endpoint computes descriptive labels from z-summaries
+- For each node: finds semantic/perceptual contrast with most extreme z_mean
+- Priority: semantic (0) > perceptual (1) > PCA (2, skipped)
+- Bipolar `sem_X_vs_Y`: high z -> Y, low z -> X; Unipolar `sem_X`: high z -> X, low z skipped
+- Labels rendered as bold white text + dark shadow on each node in atlas view
+- Fetched on init (level 0) and on enterNode (new level)
+
+### Key bindings during ride
+- Right arrow: "more like this" (record approach + advance)
+- Left arrow: "less like this" (record retreat + advance)
+- Space: skip (record + advance, no collapse)
+- ESC: abort ride, return to atlas
+- D/A keys still functional as hidden shortcuts but not shown in UI
+
+### Tests (28 new, 120 total)
+- TestRideStats (5): zsummary known values, single image node, correlation symmetric, diagonal one, known data
+- TestRideEngine (7): single no drift, high drift triggers policy, path monotone, condition restricts, reject when all fail, empty lock set, no mutation
+- TestRideSession (9): fresh at zero, step advances, approach/right, retreat/left, silence no collapse, consistent approaches, mixed decay, all silence none, completes after full path
+- TestMergeBand (2): merge new contrast, merge same direction combines
+- TestDeriveLockSet (1): excludes ride contrast
+- TestDriftAtPosition (2): drift at start zero, drift increases along path
+- TestIntegration (2): ride_plan_endpoint, full_ride_flow
+
+### Verification results
+- 120/120 tests pass (11 indexer + 8 embedding + 8 contrast + 16 arcade + 38 atlas + 11 sigil scoring + 28 ride)
+- ride-stats CLI: artifacts created (36 contrasts, 4 levels, under 1s)
+- R key opens picker with all 36 contrasts, collapsed ones highlighted
+- Temperature ride: single resolution, 22 nodes, pole labels "less temperature"/"more temperature"
+- Camera snaps back to overview on ESC abort and on ride completion (no black screen)
+- Sigil overlay (G key) suppressed during ride; resumes after abort/completion
+- Drift monitor shows all locked contrasts at 0.00 at start, updates per step
+- ESC dismisses all dialogs correctly
+- Invariant 4.1: enter still anchors to rect
+- Invariant 4.2: ESC instant from any depth
+- Invariant 4.3: navigation without ride choices doesn't modify sigil
+- Invariant 4.5: ESC always available during ride
+- UI live at http://127.0.0.1:8888/atlas

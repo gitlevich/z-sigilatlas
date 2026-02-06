@@ -65,6 +65,34 @@ def cmd_atlas(args):
     return stats
 
 
+def cmd_ride_stats(args):
+    import json
+    from sigiltree.ride_stats import compute_ride_stats, save_ride_stats
+    from sigiltree.atlas import load_atlas_meta, load_atlas_manifest
+    artifacts = Path(args.artifact_dir)
+    if not artifacts.is_dir():
+        print(f"Artifact dir not found: {artifacts}", file=sys.stderr)
+        sys.exit(1)
+    coords_path = artifacts / "contrasts" / "coordinates.json"
+    if not coords_path.exists():
+        print(f"coordinates.json not found: {coords_path}", file=sys.stderr)
+        sys.exit(1)
+    coordinates = json.loads(coords_path.read_text())
+    manifest = load_atlas_manifest(artifacts)
+    all_level_nodes = []
+    for lvl in range(manifest["max_level"] + 1):
+        meta = load_atlas_meta(artifacts, level=lvl)
+        all_level_nodes.append(meta["nodes"])
+    stats = compute_ride_stats(coordinates, all_level_nodes)
+    save_ride_stats(stats, artifacts)
+    n_contrasts = len(stats["correlations"])
+    n_levels = len(stats["zsummaries"])
+    logging.getLogger(__name__).info(
+        "Ride stats: %d contrasts, %d levels", n_contrasts, n_levels,
+    )
+    return stats
+
+
 def cmd_serve(args):
     from sigiltree.viewer_server import run_server
     artifacts = Path(args.artifact_dir)
@@ -107,6 +135,10 @@ def main():
     p_atlas.add_argument("--levels", type=int, default=1, help="Number of levels to build")
     p_atlas.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility")
 
+    sub.add_parser("ride-stats", help="Precompute ride z-summaries and correlations").add_argument(
+        "artifact_dir", help="Path to artifact directory"
+    )
+
     p_serve = sub.add_parser("serve", help="Launch the thumbnail grid viewer")
     p_serve.add_argument("artifact_dir", help="Path to artifact directory")
     p_serve.add_argument("--host", default="127.0.0.1")
@@ -127,6 +159,8 @@ def main():
         cmd_contrasts(args)
     elif args.command == "atlas":
         cmd_atlas(args)
+    elif args.command == "ride-stats":
+        cmd_ride_stats(args)
     elif args.command == "serve":
         cmd_serve(args)
 

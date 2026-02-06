@@ -15,6 +15,7 @@ def create_app(artifact_dir: Path) -> web.Application:
     app = web.Application()
     app["artifact_dir"] = artifact_dir
     app["arcade_sessions"] = {}  # user_id -> ArcadeSession
+    app["ride_sessions"] = {}    # user_id -> RideSession
     app.router.add_get("/", handle_index)
     app.router.add_get("/nn", handle_nn_page)
     app.router.add_get("/contrasts", handle_contrasts_page)
@@ -36,6 +37,12 @@ def create_app(artifact_dir: Path) -> web.Application:
     app.router.add_get("/api/atlas/node/{node_id}/children", handle_atlas_node_children)
     app.router.add_get("/api/atlas/neighborhood/{node_id}", handle_atlas_neighborhood)
     app.router.add_get("/api/atlas/sigil_scores", handle_atlas_sigil_scores)
+    app.router.add_post("/api/ride/plan", handle_ride_plan)
+    app.router.add_post("/api/ride/step", handle_ride_step)
+    app.router.add_post("/api/ride/choose", handle_ride_choose)
+    app.router.add_get("/api/ride/summary", handle_ride_summary)
+    app.router.add_get("/api/ride/stats", handle_ride_stats)
+    app.router.add_get("/api/atlas/node_labels", handle_atlas_node_labels)
     app.router.add_get("/atlas_tiles/{path:.*}", handle_atlas_tile)
     app.router.add_static(
         "/thumbs", str(artifact_dir / "thumbnails"), show_index=False
@@ -373,6 +380,240 @@ async def handle_atlas_sigil_scores(request: web.Request) -> web.Response:
         "level": level,
         "scores": scores,
     })
+
+
+async def handle_ride_plan(request: web.Request) -> web.Response:
+    from sigiltree.arcade import load_sigil
+    from sigiltree.atlas import load_atlas_meta
+    from sigiltree.ride_stats import load_ride_stats
+    from sigiltree.ride_engine import plan_ride, derive_lock_set
+    from sigiltree.ride_session import RideSession
+
+    artifact_dir = request.app["artifact_dir"]
+    body = await request.json()
+    user_id = body.get("user_id", "default")
+    contrast_id = body.get("contrast_id")
+    level = body.get("level", 0)
+
+    if not contrast_id:
+        return web.json_response({"error": "contrast_id required"}, status=400)
+
+    # Load contrast library to map contrast_id -> contrast_name
+    lib_path = artifact_dir / "contrasts" / "contrast_library.json"
+    if not lib_path.exists():
+        return web.json_response({"error": "No contrast library"}, status=404)
+    library = json.loads(lib_path.read_text())
+
+    contrast_name = None
+    for c in library.get("contrasts", []):
+        if c["contrast_id"] == contrast_id:
+            contrast_name = c["name"]
+            break
+    if not contrast_name:
+        return web.json_response({"error": f"Unknown contrast_id: {contrast_id}"}, status=404)
+
+    # Load ride stats
+    stats = load_ride_stats(artifact_dir)
+    if stats is None:
+        return web.json_response({"error": "Ride stats not precomputed. Run ride-stats first."}, status=404)
+
+    level_key = str(level)
+    zsummaries = stats["zsummaries"].get(level_key, {})
+    correlations = stats["correlations"]
+
+    # Load sigil for lock-set
+    sigil = load_sigil(artifact_dir, user_id)
+    lock_set = derive_lock_set(contrast_name, sigil) if sigil else []
+
+    # Load atlas meta for node list
+    meta = load_atlas_meta(artifact_dir, level=level)
+    if meta is None:
+        return web.json_response({"error": f"No atlas level {level}"}, status=404)
+
+    plan = plan_ride(contrast_name, contrast_id, lock_set, zsummaries, correlations, meta["nodes"])
+
+    # Create session
+    session = RideSession(plan, contrast_id)
+    request.app["ride_sessions"][user_id] = session
+
+    return web.json_response({
+        "ride_contrast": plan.ride_contrast,
+        "ride_contrast_id": plan.ride_contrast_id,
+        "resolution": plan.resolution,
+        "path": plan.path,
+        "path_length": len(plan.path),
+        "locked": plan.locked,
+        "drift_estimates": plan.drift_estimates,
+        "condition_info": plan.condition_info,
+        "compound_info": plan.compound_info,
+        "reject_reason": plan.reject_reason,
+        "current_node_id": session.current_node_id,
+        "progress": session.progress,
+    })
+
+
+async def handle_ride_step(request: web.Request) -> web.Response:
+    from sigiltree.ride_stats import load_ride_stats
+    from sigiltree.ride_engine import compute_ride_drift_at_position
+
+    artifact_dir = request.app["artifact_dir"]
+    body = await request.json()
+    user_id = body.get("user_id", "default")
+    level = body.get("level", 0)
+
+    session = request.app["ride_sessions"].get(user_id)
+    if session is None:
+        return web.json_response({"error": "No active ride session"}, status=404)
+
+    if session.is_complete:
+        return web.json_response({"status": "complete", "band": session.build_band()})
+
+    stats = load_ride_stats(artifact_dir)
+    zsummaries = stats["zsummaries"].get(str(level), {}) if stats else {}
+
+    drift = compute_ride_drift_at_position(
+        session.path, session.position, session.plan.locked, zsummaries,
+    )
+
+    return web.json_response({
+        "status": "continue",
+        "current_node_id": session.current_node_id,
+        "position": session.position,
+        "progress": session.progress,
+        "drift": drift,
+        "ride_contrast": session.contrast_name,
+    })
+
+
+async def handle_ride_choose(request: web.Request) -> web.Response:
+    from sigiltree.arcade import load_sigil, save_sigil
+    from sigiltree.ride_session import merge_band_into_sigil
+
+    artifact_dir = request.app["artifact_dir"]
+    body = await request.json()
+    user_id = body.get("user_id", "default")
+    direction = body.get("direction")
+
+    if direction not in ("approach", "retreat", "silence"):
+        return web.json_response({"error": "direction must be approach/retreat/silence"}, status=400)
+
+    session = request.app["ride_sessions"].get(user_id)
+    if session is None:
+        return web.json_response({"error": "No active ride session"}, status=404)
+
+    result = session.record_choice(direction)
+
+    if result["status"] == "complete":
+        band = result.get("band")
+        if band:
+            sigil = load_sigil(artifact_dir, user_id)
+            if sigil:
+                updated = merge_band_into_sigil(sigil, band)
+            else:
+                updated = {
+                    "version": "ride_v1",
+                    "contrast_library_version": "",
+                    "user_id": user_id,
+                    "entries": {band["contrast_id"]: band},
+                }
+            # Ensure save_sigil-required fields exist
+            updated.setdefault("collapsed_count", len(updated.get("entries", {})))
+            updated.setdefault("superposed_count", 0)
+            save_sigil(updated, artifact_dir)
+            log.info("Ride complete for user %s, contrast %s: %s", user_id, band["contrast_name"], band["direction"])
+
+    return web.json_response(result)
+
+
+async def handle_ride_summary(request: web.Request) -> web.Response:
+    user_id = request.query.get("user_id", "default")
+
+    session = request.app["ride_sessions"].get(user_id)
+    if session is None:
+        return web.json_response({"error": "No active ride session"}, status=404)
+
+    state = session.get_state()
+    state["band"] = session.build_band()
+    return web.json_response(state)
+
+
+async def handle_ride_stats(request: web.Request) -> web.Response:
+    from sigiltree.ride_stats import load_ride_stats
+
+    artifact_dir = request.app["artifact_dir"]
+    level = request.query.get("level")
+
+    stats = load_ride_stats(artifact_dir)
+    if stats is None:
+        return web.json_response({"error": "Ride stats not computed"}, status=404)
+
+    if level is not None:
+        zsummaries = stats["zsummaries"].get(str(level), {})
+        return web.json_response({"level": int(level), "zsummaries": zsummaries, "correlations": stats["correlations"]})
+
+    return web.json_response(stats)
+
+
+async def handle_atlas_node_labels(request: web.Request) -> web.Response:
+    """Compute descriptive labels for atlas nodes from z-summaries.
+
+    For each node, finds the semantic or perceptual contrast with the most
+    extreme z_mean and derives a human-readable label from it.
+    """
+    import re
+    from sigiltree.ride_stats import load_ride_stats
+
+    artifact_dir = request.app["artifact_dir"]
+    level = request.query.get("level", "0")
+
+    stats = load_ride_stats(artifact_dir)
+    if stats is None:
+        return web.json_response({"error": "Ride stats not computed"}, status=404)
+
+    level_zs = stats["zsummaries"].get(str(level), {})
+    if not level_zs:
+        return web.json_response({"error": f"No z-summaries for level {level}"}, status=404)
+
+    # Collect all node_ids
+    node_ids = set()
+    for cname, node_dict in level_zs.items():
+        node_ids.update(node_dict.keys())
+
+    def contrast_priority(cname):
+        if cname.startswith("sem_"):
+            return 0
+        if cname.startswith("pca_"):
+            return 2
+        return 1
+
+    def derive_label(cname, z):
+        m = re.match(r"^sem_(.+)_vs_(.+)$", cname)
+        if m:
+            return m.group(2).replace("_", " ") if z > 0 else m.group(1).replace("_", " ")
+        m = re.match(r"^sem_(.+)$", cname)
+        if m:
+            name = m.group(1).replace("_", " ")
+            return name if z > 0 else None
+        if not cname.startswith("pca_"):
+            if cname == "brightness":
+                return "bright" if z > 0 else "dark"
+            return cname if z > 0 else f"low {cname}"
+        return None
+
+    labels = {}
+    for nid in node_ids:
+        candidates = []
+        for cname, node_dict in level_zs.items():
+            zm = node_dict.get(nid, {}).get("z_mean", 0)
+            pri = contrast_priority(cname)
+            label = derive_label(cname, zm)
+            if label:
+                candidates.append((pri, -abs(zm), label, cname, zm))
+        candidates.sort()
+        if candidates:
+            labels[nid] = candidates[0][2]
+
+    return web.json_response({"level": int(level), "labels": labels})
 
 
 async def handle_atlas_tile(request: web.Request) -> web.Response:
@@ -1122,6 +1363,68 @@ ATLAS_VIEWER_HTML = r"""<!DOCTYPE html>
     border: 1px solid rgba(255,170,0,0.3);
   }
   #sigilIndicator.active { display: inline; }
+  #rideIndicator {
+    display: none; margin-left: 8px; padding: 2px 8px; border-radius: 3px;
+    font-size: 11px; font-weight: 600;
+    background: rgba(100,200,255,0.15); color: #6cf;
+    border: 1px solid rgba(100,200,255,0.3);
+  }
+  #rideIndicator.active { display: inline; }
+  #ride-picker {
+    display: none; position: fixed; top: 50%; left: 50%;
+    transform: translate(-50%, -50%);
+    background: #1a1a1a; border: 2px solid #6cf; border-radius: 8px;
+    padding: 16px; z-index: 50; max-height: 80vh; overflow-y: auto;
+    min-width: 280px; color: #ddd; font-size: 13px;
+  }
+  #ride-picker.active { display: block; }
+  #ride-picker h3 { margin: 0 0 12px; color: #6cf; font-size: 15px; }
+  #ride-picker .contrast-item {
+    padding: 6px 10px; cursor: pointer; border-radius: 4px; margin: 2px 0;
+  }
+  #ride-picker .contrast-item:hover { background: rgba(100,200,255,0.15); }
+  #ride-picker .contrast-item.collapsed { color: #fa6; }
+  #ride-consent {
+    display: none; position: fixed; top: 50%; left: 50%;
+    transform: translate(-50%, -50%);
+    background: #1a1a1a; border: 2px solid #6cf; border-radius: 8px;
+    padding: 20px; z-index: 50; min-width: 320px; color: #ddd; font-size: 13px;
+  }
+  #ride-consent.active { display: block; }
+  #ride-consent h3 { margin: 0 0 12px; color: #6cf; }
+  #ride-consent .actions { margin-top: 16px; display: flex; gap: 12px; }
+  #ride-consent button {
+    padding: 6px 16px; border-radius: 4px; border: 1px solid #555;
+    background: #333; color: #ddd; cursor: pointer; font-size: 13px;
+  }
+  #ride-consent button.primary { background: #2a5; border-color: #2a5; color: #fff; }
+  #ride-drift-monitor {
+    display: none; position: fixed; top: 60px; right: 12px;
+    background: rgba(20,20,20,0.9); border: 1px solid #444; border-radius: 6px;
+    padding: 10px 14px; z-index: 30; min-width: 200px; font-size: 12px; color: #ccc;
+  }
+  #ride-drift-monitor.active { display: block; }
+  #ride-drift-monitor h4 { margin: 0 0 8px; color: #6cf; font-size: 13px; }
+  .drift-bar { margin: 3px 0; }
+  .drift-bar-label { display: inline-block; width: 100px; overflow: hidden; text-overflow: ellipsis; }
+  .drift-bar-track { display: inline-block; width: 80px; height: 8px; background: #333; border-radius: 3px; vertical-align: middle; margin-left: 4px; }
+  .drift-bar-fill { height: 100%; border-radius: 3px; }
+  #ride-completion {
+    display: none; position: fixed; top: 50%; left: 50%;
+    transform: translate(-50%, -50%);
+    background: #1a1a1a; border: 2px solid #2a5; border-radius: 8px;
+    padding: 20px; z-index: 50; min-width: 300px; color: #ddd; font-size: 13px;
+  }
+  #ride-completion.active { display: block; }
+  #ride-completion h3 { margin: 0 0 12px; color: #2a5; }
+  #ride-progress-bar {
+    display: none; position: fixed; bottom: 12px; left: 50%;
+    transform: translateX(-50%);
+    background: rgba(20,20,20,0.85); border: 1px solid #444; border-radius: 4px;
+    padding: 6px 14px; z-index: 30; font-size: 12px; color: #ccc;
+    white-space: nowrap;
+  }
+  #ride-progress-bar.active { display: block; }
   /* Member panel */
   #neighborhood-panel {
     display: none; position: fixed; bottom: 0; left: 0; right: 0;
@@ -1153,11 +1456,17 @@ ATLAS_VIEWER_HTML = r"""<!DOCTYPE html>
   <span class="stats" id="stats">Loading...</span>
   <span class="breadcrumb" id="breadcrumb"></span>
   <span id="sigilIndicator">SIGIL</span>
+  <span id="rideIndicator">RIDE</span>
   <span class="mode" id="modeLabel">L0</span>
 </div>
 <canvas id="atlas-canvas"></canvas>
 <canvas id="minimap" width="120" height="120"></canvas>
 <div id="debug-overlay"></div>
+<div id="ride-picker"><h3>Select Contrast for Ride</h3><div id="ride-picker-list"></div></div>
+<div id="ride-consent"><h3 id="ride-consent-title"></h3><div id="ride-consent-body"></div><div class="actions"><button class="primary" onclick="confirmRide()">Start Ride</button><button onclick="cancelRide()">Cancel</button></div></div>
+<div id="ride-drift-monitor"><h4>Drift Monitor</h4><div id="drift-bars"></div></div>
+<div id="ride-progress-bar"></div>
+<div id="ride-completion"><h3>Ride Complete</h3><div id="ride-completion-body"></div><div class="actions"><button class="primary" onclick="dismissRideCompletion()">OK</button></div></div>
 <div id="neighborhood-panel">
   <div class="panel-header">
     <span class="panel-title" id="panelTitle">Neighborhood</span>
@@ -1221,6 +1530,51 @@ let sigilScores = {};       // {level: {node_id: {score, breakdown}}}
 let sigilVisual = {};       // {level: {node_id: float}} rank-stretched to [0,1]
 let sigilMeta = null;       // {sigil_version, collapsed_contrasts}
 let sigilFetching = false;
+
+// Node labels: descriptive text per node from z-summaries
+let nodeLabels = {};        // {level: {node_id: string}}
+
+async function fetchNodeLabels(level) {
+  if (nodeLabels[level]) return;
+  try {
+    const r = await fetch(`/api/atlas/node_labels?level=${level}`);
+    if (!r.ok) return;
+    const data = await r.json();
+    nodeLabels[level] = data.labels || {};
+    scheduleFrame();
+  } catch (e) { /* labels are optional */ }
+}
+
+// Derive human-readable pole labels from contrast name
+function ridePoleLabels(contrastName) {
+  // Bipolar: "sem_X_vs_Y" -> LOW=X, HIGH=Y
+  const vsMatch = contrastName.match(/^sem_(.+)_vs_(.+)$/);
+  if (vsMatch) {
+    return { low: vsMatch[1].replace(/_/g, ' '), high: vsMatch[2].replace(/_/g, ' ') };
+  }
+  // Unipolar semantic: "sem_X" -> LOW="less X", HIGH="more X"
+  const semMatch = contrastName.match(/^sem_(.+)$/);
+  if (semMatch) {
+    const label = semMatch[1].replace(/_/g, ' ');
+    return { low: 'less ' + label, high: 'more ' + label };
+  }
+  // Perceptual: "brightness" -> LOW="less brightness", HIGH="more brightness"
+  if (!contrastName.startsWith('pca_')) {
+    return { low: 'less ' + contrastName, high: 'more ' + contrastName };
+  }
+  // PCA/emergent: no semantic poles available
+  return { low: 'LOW', high: 'HIGH' };
+}
+
+// Ride state
+let rideActive = false;
+let ridePlan = null;         // plan from /api/ride/plan
+let ridePosition = 0;
+let rideDrift = {};          // {contrast_name: current_z_drift}
+let ridePickerActive = false;
+let rideContrastList = [];   // [{contrast_id, name}]
+let ridePendingPlan = null;  // plan awaiting consent
+let rideTolerance = 0.5;
 
 // Animation
 let animFrameId = null;
@@ -1487,6 +1841,285 @@ function updateSigilIndicator() {
 }
 
 // ---------------------------------------------------------------------------
+// Ride: contrast rides with drift policy
+// ---------------------------------------------------------------------------
+
+function toggleRidePicker() {
+  if (rideActive) return;  // can't open picker during a ride
+  ridePickerActive = !ridePickerActive;
+  const el = document.getElementById('ride-picker');
+  if (ridePickerActive) {
+    loadContrastList();
+    el.classList.add('active');
+  } else {
+    el.classList.remove('active');
+  }
+}
+
+async function loadContrastList() {
+  const r = await fetch('/api/contrasts');
+  if (!r.ok) return;
+  const lib = await r.json();
+  rideContrastList = lib.contrasts || [];
+
+  // Get sigil to know which are collapsed
+  let collapsedNames = [];
+  try {
+    const sr = await fetch('/api/sigil?user_id=default');
+    if (sr.ok) {
+      const sig = await sr.json();
+      collapsedNames = Object.values(sig.entries || {}).map(e => e.contrast_name);
+    }
+  } catch(e) {}
+
+  const listEl = document.getElementById('ride-picker-list');
+  listEl.innerHTML = '';
+  for (const c of rideContrastList) {
+    const div = document.createElement('div');
+    div.className = 'contrast-item' + (collapsedNames.includes(c.name) ? ' collapsed' : '');
+    div.textContent = c.name + (collapsedNames.includes(c.name) ? ' (collapsed)' : '');
+    div.onclick = () => startRidePlan(c.contrast_id, c.name);
+    listEl.appendChild(div);
+  }
+}
+
+async function startRidePlan(contrastId, contrastName) {
+  document.getElementById('ride-picker').classList.remove('active');
+  ridePickerActive = false;
+
+  const lvl = currentLevel();
+  const r = await fetch('/api/ride/plan', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({user_id: 'default', contrast_id: contrastId, level: lvl}),
+  });
+  if (!r.ok) return;
+  const plan = await r.json();
+  ridePendingPlan = plan;
+
+  // Show consent screen based on resolution
+  const titleEl = document.getElementById('ride-consent-title');
+  const bodyEl = document.getElementById('ride-consent-body');
+
+  if (plan.resolution === 'reject') {
+    titleEl.textContent = 'Ride Not Available';
+    bodyEl.innerHTML = `<p>${plan.reject_reason || 'This contrast cannot be isolated as a single-axis ride in this corpus.'}</p><p>The contrast will remain superposed.</p>`;
+    document.getElementById('ride-consent').classList.add('active');
+    document.querySelector('#ride-consent .primary').style.display = 'none';
+    return;
+  }
+
+  document.querySelector('#ride-consent .primary').style.display = '';
+
+  const poles = ridePoleLabels(contrastName);
+  const controlsHtml = `<p>Controls: <b>Left</b> = less like this, <b>Right</b> = more like this, <b>Space</b> = skip, <b>ESC</b> = abort</p>`;
+
+  if (plan.resolution === 'single') {
+    titleEl.textContent = 'Ride: ' + contrastName;
+    bodyEl.innerHTML = `<p>Sweep <b>${contrastName}</b> from <b>${poles.low}</b> to <b>${poles.high}</b> across <b>${plan.path_length}</b> nodes.</p>` +
+      (plan.locked.length ? `<p>Locked contrasts: ${plan.locked.join(', ')}</p>` : '') +
+      controlsHtml;
+  } else if (plan.resolution === 'compound') {
+    titleEl.textContent = 'Compound Ride: ' + contrastName;
+    const ci = plan.compound_info;
+    bodyEl.innerHTML = `<p>Riding <b>${contrastName}</b> also affects <b>${ci.drifting_contrast}</b> ` +
+      `(drift: ${ci.drift_magnitude.toFixed(2)} z-score).</p>` +
+      `<p>This is a <b>two-axis ride</b>. Both contrasts will vary.</p>` +
+      controlsHtml;
+  } else if (plan.resolution === 'condition') {
+    titleEl.textContent = 'Conditioned Ride: ' + contrastName;
+    const ci = plan.condition_info;
+    bodyEl.innerHTML = `<p>Restricted to <b>${ci.restricted_len}</b> of ${ci.original_len} nodes ` +
+      `where <b>${ci.contrast_name}</b> is stable (z-band: ${ci.z_band[0].toFixed(2)} to ${ci.z_band[1].toFixed(2)}).</p>` +
+      controlsHtml;
+  }
+  document.getElementById('ride-consent').classList.add('active');
+}
+
+function confirmRide() {
+  document.getElementById('ride-consent').classList.remove('active');
+  if (!ridePendingPlan || ridePendingPlan.resolution === 'reject') return;
+  beginRide(ridePendingPlan);
+}
+
+function cancelRide() {
+  document.getElementById('ride-consent').classList.remove('active');
+  ridePendingPlan = null;
+}
+
+function beginRide(plan) {
+  ridePlan = plan;
+  rideActive = true;
+  ridePosition = 0;
+  rideDrift = {};
+  updateRideIndicator();
+
+  // Show drift monitor if there are locked contrasts
+  if (plan.locked.length > 0) {
+    document.getElementById('ride-drift-monitor').classList.add('active');
+  }
+  document.getElementById('ride-progress-bar').classList.add('active');
+
+  // Navigate camera to first node
+  navigateToRideNode(0);
+  updateRideProgress();
+  fetchRideDrift();
+}
+
+function navigateToRideNode(position) {
+  if (!ridePlan || position >= ridePlan.path.length) return;
+  const nodeId = ridePlan.path[position];
+  const nodes = currentNodes();
+  const node = nodes.find(n => n.node_id === nodeId);
+  if (!node) return;
+
+  const [rx, ry, rw, rh] = node.rect;
+  const cw = canvas.clientWidth, ch = canvas.clientHeight;
+  const zoomFit = Math.min(cw / rw, ch / rh) * 0.7;
+  setCameraTarget({
+    x: -(rx + rw / 2) * zoomFit + cw / 2,
+    y: -(ry + rh / 2) * zoomFit + ch / 2,
+    zoom: zoomFit,
+  });
+}
+
+async function fetchRideDrift() {
+  if (!rideActive || !ridePlan) return;
+  const r = await fetch('/api/ride/step', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({user_id: 'default', level: currentLevel()}),
+  });
+  if (!r.ok) return;
+  const data = await r.json();
+  rideDrift = data.drift || {};
+  updateDriftMonitor();
+}
+
+function updateDriftMonitor() {
+  const barsEl = document.getElementById('drift-bars');
+  if (!ridePlan || !ridePlan.locked.length) { barsEl.innerHTML = ''; return; }
+
+  let html = '';
+  for (const lc of ridePlan.locked) {
+    const drift = rideDrift[lc] || 0;
+    const pct = Math.min(100, (drift / rideTolerance) * 100);
+    let color = '#2a5';
+    if (pct > 80) color = '#c44';
+    else if (pct > 50) color = '#ca3';
+    html += `<div class="drift-bar">` +
+      `<span class="drift-bar-label">${lc}</span>` +
+      `<span class="drift-bar-track"><span class="drift-bar-fill" style="width:${pct}%;background:${color}"></span></span>` +
+      ` <span>${drift.toFixed(2)}</span></div>`;
+  }
+  barsEl.innerHTML = html;
+}
+
+function updateRideProgress() {
+  const el = document.getElementById('ride-progress-bar');
+  if (!rideActive || !ridePlan) { el.innerHTML = ''; return; }
+  const total = ridePlan.path.length;
+  const p = ridePoleLabels(ridePlan.ride_contrast);
+  const pct = (ridePosition) / (total - 1);
+  const barW = 120;
+  const filled = Math.round(pct * barW);
+  const bar = `<span style="display:inline-block;width:${barW}px;height:6px;background:#333;border-radius:3px;vertical-align:middle;margin:0 6px;position:relative"><span style="display:block;width:${filled}px;height:100%;background:#5af;border-radius:3px"></span></span>`;
+  el.innerHTML = `<span style="opacity:0.5">Left = less like this</span>` +
+    ` &nbsp; <span style="opacity:0.6">${p.low}</span> ${bar} <span style="opacity:0.6">${p.high}</span>` +
+    ` &nbsp; ${ridePosition + 1}/${total}` +
+    ` &nbsp; <span style="opacity:0.5">Right = more like this</span>` +
+    ` &nbsp; <span style="opacity:0.35">Space=skip  ESC=abort</span>`;
+}
+
+async function rideChoose(direction) {
+  if (!rideActive) return;
+  const r = await fetch('/api/ride/choose', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({user_id: 'default', direction: direction}),
+  });
+  if (!r.ok) return;
+  const data = await r.json();
+
+  if (data.status === 'complete') {
+    endRide(data.band);
+  } else {
+    ridePosition = data.progress ? data.progress.position : ridePosition + 1;
+    navigateToRideNode(ridePosition);
+    updateRideProgress();
+    fetchRideDrift();
+  }
+}
+
+function endRide(band) {
+  rideActive = false;
+  ridePlan = null;
+  updateRideIndicator();
+  document.getElementById('ride-drift-monitor').classList.remove('active');
+  document.getElementById('ride-progress-bar').classList.remove('active');
+
+  // Show completion overlay
+  const bodyEl = document.getElementById('ride-completion-body');
+  if (band) {
+    const bp = ridePoleLabels(band.contrast_name);
+    const arrow = band.direction === 'right' ? bp.high : bp.low;
+    bodyEl.innerHTML = `<p>Contrast <b>${band.contrast_name}</b> collapsed toward <b>${arrow}</b></p>` +
+      `<p>Strength: ${band.strength.toFixed(2)} (${band.n_agreements}/${band.n_presentations} agreements)</p>`;
+  } else {
+    bodyEl.innerHTML = '<p>All skipped. Contrast remains superposed.</p>';
+  }
+  document.getElementById('ride-completion').classList.add('active');
+
+  // Invalidate sigil caches so G overlay refreshes
+  sigilScores = {};
+  sigilVisual = {};
+}
+
+function abortRide() {
+  rideActive = false;
+  ridePlan = null;
+  ridePosition = 0;
+  rideDrift = {};
+  updateRideIndicator();
+  document.getElementById('ride-drift-monitor').classList.remove('active');
+  document.getElementById('ride-progress-bar').classList.remove('active');
+  // Snap camera to full atlas overview (no lerp — instant reset)
+  while (viewStack.length > 1) viewStack.pop();
+  const cw = canvas.clientWidth;
+  const ch = canvas.clientHeight;
+  const target = fitToRect(0, 0, 1, 1, cw, ch, 20);
+  cam.x = target.x; cam.y = target.y; cam.zoom = target.zoom;
+  camTarget.x = target.x; camTarget.y = target.y; camTarget.zoom = target.zoom;
+  closeMembers();
+  updateBreadcrumb();
+  scheduleFrame();
+}
+
+function dismissRideCompletion() {
+  document.getElementById('ride-completion').classList.remove('active');
+  // Snap camera to full atlas overview (no lerp — instant reset)
+  while (viewStack.length > 1) viewStack.pop();
+  const cw = canvas.clientWidth;
+  const ch = canvas.clientHeight;
+  const target = fitToRect(0, 0, 1, 1, cw, ch, 20);
+  cam.x = target.x; cam.y = target.y; cam.zoom = target.zoom;
+  camTarget.x = target.x; camTarget.y = target.y; camTarget.zoom = target.zoom;
+  closeMembers();
+  updateBreadcrumb();
+  scheduleFrame();
+}
+
+function updateRideIndicator() {
+  const el = document.getElementById('rideIndicator');
+  if (rideActive) {
+    el.textContent = ridePlan ? 'RIDE: ' + ridePlan.ride_contrast : 'RIDE';
+    el.classList.add('active');
+  } else {
+    el.classList.remove('active');
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Tile loading & prefetching
 // ---------------------------------------------------------------------------
 
@@ -1562,7 +2195,8 @@ function draw() {
 
     // Sigil overlay: dim non-aligned, brighten aligned
     // Uses rank-stretched visual scores for perceptible contrast
-    if (sigilActive) {
+    // Suppressed during ride to avoid conflicting visual layers
+    if (sigilActive && !rideActive) {
       const lvl = currentLevel();
       const vis = sigilVisual[lvl];
       if (vis !== undefined) {
@@ -1594,19 +2228,59 @@ function draw() {
       }
     }
 
+    // Ride overlay: highlight current ride node, dim non-ride nodes
+    if (rideActive && ridePlan) {
+      const currentRideNodeId = ridePlan.path[ridePosition];
+      if (node.node_id === currentRideNodeId) {
+        // Current ride node: bright cyan border
+        ctx.strokeStyle = 'rgba(100,200,255,0.8)';
+        ctx.lineWidth = Math.max(3, Math.min(6, sw * 0.015));
+        ctx.strokeRect(tl.x + 1, tl.y + 1, sw - 2, sh - 2);
+      } else if (!ridePlan.path.includes(node.node_id)) {
+        // Node not in ride path: strong dim
+        ctx.fillStyle = 'rgba(0,0,0,0.6)';
+        ctx.fillRect(tl.x, tl.y, sw, sh);
+      } else {
+        // Node in path but not current: light dim
+        ctx.fillStyle = 'rgba(0,0,0,0.3)';
+        ctx.fillRect(tl.x, tl.y, sw, sh);
+      }
+    }
+
     // Border
     const hasChildren = node.child_ids && node.child_ids.length > 0;
     ctx.strokeStyle = hasChildren ? '#555' : '#333';
     ctx.lineWidth = 0.5;
     ctx.strokeRect(tl.x, tl.y, sw, sh);
 
-    // Label
+    // Label: descriptive name + count
     if (sw > 60 && sh > 24) {
-      ctx.fillStyle = hasChildren ? 'rgba(200,200,200,0.7)' : 'rgba(200,200,200,0.4)';
-      ctx.font = `${Math.max(9, Math.min(13, sw / 8))}px system-ui`;
+      const lvl = currentLevel();
+      const lvlLabels = nodeLabels[lvl];
+      const descLabel = lvlLabels ? lvlLabels[node.node_id] : null;
+      const fontSize = Math.max(9, Math.min(14, sw / 7));
+      ctx.font = `bold ${fontSize}px system-ui`;
       ctx.textAlign = 'center';
-      const label = `${node.size}`;
-      ctx.fillText(label, tl.x + sw / 2, tl.y + sh / 2 + 4);
+      ctx.textBaseline = 'middle';
+      const cx = tl.x + sw / 2;
+      const cy = tl.y + sh / 2;
+      if (descLabel && sw > 80) {
+        // Draw text with shadow for readability
+        ctx.fillStyle = 'rgba(0,0,0,0.6)';
+        ctx.fillText(descLabel, cx + 1, cy - fontSize * 0.4 + 1);
+        ctx.fillStyle = 'rgba(255,255,255,0.85)';
+        ctx.fillText(descLabel, cx, cy - fontSize * 0.4);
+        // Count below
+        ctx.font = `${fontSize * 0.8}px system-ui`;
+        ctx.fillStyle = 'rgba(0,0,0,0.5)';
+        ctx.fillText(`${node.size}`, cx + 1, cy + fontSize * 0.6 + 1);
+        ctx.fillStyle = 'rgba(200,200,200,0.6)';
+        ctx.fillText(`${node.size}`, cx, cy + fontSize * 0.6);
+      } else {
+        ctx.fillStyle = hasChildren ? 'rgba(200,200,200,0.7)' : 'rgba(200,200,200,0.4)';
+        ctx.fillText(`${node.size}`, cx, cy);
+      }
+      ctx.textBaseline = 'alphabetic';
     }
   }
 
@@ -1752,6 +2426,21 @@ function drawDebug() {
     html += `<br><b>Sigil:</b> active (hover node for detail)<br>`;
   }
 
+  // Ride debug info
+  if (rideActive && ridePlan) {
+    html += `<br><b>--- Ride ---</b><br>`;
+    html += `<b>Contrast:</b> ${ridePlan.ride_contrast}<br>`;
+    html += `<b>Resolution:</b> ${ridePlan.resolution}<br>`;
+    html += `<b>Position:</b> ${ridePosition + 1} / ${ridePlan.path.length}<br>`;
+    html += `<b>Current node:</b> ${ridePlan.path[ridePosition] || 'done'}<br>`;
+    if (Object.keys(rideDrift).length > 0) {
+      html += `<b>Drift:</b><br>`;
+      for (const [lc, d] of Object.entries(rideDrift)) {
+        html += `  ${lc}: ${d.toFixed(3)}<br>`;
+      }
+    }
+  }
+
   el.innerHTML = html;
 }
 
@@ -1812,6 +2501,7 @@ async function init() {
 
     fitOverview();
     updateBreadcrumb();
+    fetchNodeLabels(0);
     scheduleFrame();
   } catch (e) {
     document.getElementById('stats').textContent = 'Error loading atlas: ' + e.message;
@@ -1881,10 +2571,11 @@ async function enterNode(node) {
   closeMembers();
   updateBreadcrumb();
 
-  // Fetch sigil scores for new level
+  // Fetch sigil scores and node labels for new level
   if (sigilActive) {
     fetchSigilScores(node.level + 1);
   }
+  fetchNodeLabels(node.level + 1);
 }
 
 function exitToParent() {
@@ -2041,8 +2732,36 @@ canvas.addEventListener('wheel', (e) => {
 // ---------------------------------------------------------------------------
 
 document.addEventListener('keydown', (e) => {
-  // Drive keys
-  if (DRIVE_KEYS.has(e.key)) {
+  // Ride mode intercepts all drive/action keys
+  if (rideActive && !ridePickerActive) {
+    if (e.key === 'd' || e.key === 'D' || e.key === 'ArrowRight') {
+      e.preventDefault(); rideChoose('approach'); return;
+    } else if (e.key === 'a' || e.key === 'A' || e.key === 'ArrowLeft') {
+      e.preventDefault(); rideChoose('retreat'); return;
+    } else if (e.key === ' ') {
+      e.preventDefault(); rideChoose('silence'); return;
+    } else if (e.key === 'Escape') {
+      e.preventDefault(); abortRide(); return;
+    }
+  }
+
+  // ESC closes ride picker/consent/completion
+  if (e.key === 'Escape') {
+    if (ridePickerActive) {
+      document.getElementById('ride-picker').classList.remove('active');
+      ridePickerActive = false;
+      e.preventDefault(); return;
+    }
+    if (document.getElementById('ride-consent').classList.contains('active')) {
+      cancelRide(); e.preventDefault(); return;
+    }
+    if (document.getElementById('ride-completion').classList.contains('active')) {
+      dismissRideCompletion(); e.preventDefault(); return;
+    }
+  }
+
+  // Drive keys (disabled during ride)
+  if (DRIVE_KEYS.has(e.key) && !rideActive) {
     e.preventDefault();
     keysDown.add(e.key);
     scheduleFrame();
@@ -2073,6 +2792,12 @@ document.addEventListener('keydown', (e) => {
     }
     updateSigilIndicator();
     scheduleFrame();
+  } else if (e.key === 'r' || e.key === 'R') {
+    if (rideActive) {
+      abortRide();
+    } else {
+      toggleRidePicker();
+    }
   }
 });
 
