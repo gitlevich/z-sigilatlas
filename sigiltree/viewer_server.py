@@ -614,6 +614,17 @@ async def handle_atlas_node_doors(request: web.Request) -> web.Response:
                 for child in children:
                     doors.append({**child, "door_type": "down"})
 
+    # Member images: for leaf nodes with multiple images, expose them
+    # so the client can display the node's actual content alongside doors.
+    members = []
+    if parent_node and parent_node.get("is_leaf") and parent_node.get("size", 0) > 1:
+        for iid in parent_node.get("image_ids", []):
+            members.append({
+                "image_id": iid,
+                "thumb_url": f"/thumbs/512/{iid}.jpg",
+                "door_type": "member",
+            })
+
     # Lateral doors: flow-neighbors at same level
     flow = _cached_flow(request.app, artifact_dir, level)
     if flow:
@@ -629,6 +640,7 @@ async def handle_atlas_node_doors(request: web.Request) -> web.Response:
 
     return web.json_response({
         "doors": doors,
+        "members": members,
         "node_id": node_id,
         "level": level,
     })
@@ -1941,17 +1953,23 @@ function showFlythroughToast(msg) {
 // ---------------------------------------------------------------------------
 
 function tilePath(node) {
+  if (node.thumb_url) return node.thumb_url;
   return `/atlas_tiles/level${node.level}/${node.tile_path}`;
 }
 
+function tileCacheKey(node) {
+  return node.image_id || node.node_id;
+}
+
 function ensureTile(node) {
-  const cached = tileCache[node.node_id];
+  const key = tileCacheKey(node);
+  const cached = tileCache[key];
   if (cached) { cached.lastUsed = performance.now(); return; }
   evictTiles();
   const img = new window.Image();
-  tileCache[node.node_id] = { img: img, loaded: false, lastUsed: performance.now() };
+  tileCache[key] = { img: img, loaded: false, lastUsed: performance.now() };
   img.onload = () => {
-    tileCache[node.node_id].loaded = true;
+    tileCache[key].loaded = true;
     scheduleFrame();
   };
   img.onerror = () => {};
@@ -1962,7 +1980,7 @@ function evictTiles() {
   const keys = Object.keys(tileCache);
   if (keys.length < TILE_CACHE_MAX) return;
   // Keep tiles visible in the current frame
-  const visible = new Set((currentNodes() || []).map(n => n.node_id));
+  const visible = new Set((currentNodes() || []).map(n => tileCacheKey(n)));
   // Sort by lastUsed ascending (oldest first)
   const evictable = keys.filter(k => !visible.has(k))
     .sort((a, b) => (tileCache[a].lastUsed || 0) - (tileCache[b].lastUsed || 0));
@@ -2032,7 +2050,7 @@ function draw() {
     const ih = Math.max(1, sh - gap * 2);
 
     ensureTile(node);
-    const tc = tileCache[node.node_id];
+    const tc = tileCache[tileCacheKey(node)];
     if (tc && tc.loaded) {
       // Contain-fit: show the full image, no cropping.
       // Cells are shaped to match tile aspect ratios, so gaps are minimal.
@@ -2540,7 +2558,7 @@ function hitTest(sx, sy) {
 
 async function enterNode(node) {
   // Don't re-enter the room we're already in
-  if (node.door_type === 'self') return;
+  if (node.door_type === 'self' || node.door_type === 'member') return;
 
   // Silent calibration: record every node entry
   recordFlythroughVisit(node);
@@ -2550,7 +2568,7 @@ async function enterNode(node) {
   // Fetch doors: back + down (children) + lateral (flow-neighbors)
   const level = node.level !== undefined ? node.level : currentLevel();
   const fromNode = curFrame?.parentNode?.node_id || '';
-  const fromLevel = curFrame ? curFrame.level : level;
+  const fromLevel = curFrame?.parentNode?.level !== undefined ? curFrame.parentNode.level : (curFrame ? curFrame.level : level);
   const r = await fetch(`/api/atlas/node/${node.node_id}/doors?level=${level}&from_node=${fromNode}&from_level=${fromLevel}`);
   const data = await r.json();
 
@@ -2562,10 +2580,29 @@ async function enterNode(node) {
   const hasDown = data.doors.some(d => d.door_type === 'down');
   const frameLevel = hasDown ? level + 1 : level;
 
-  // Unified grid layout. For single-image nodes, the image itself joins
-  // the grid as a weighted tile so it dominates the first row.
+  // Unified grid layout.
+  // For leaf nodes: show member images (the node's actual content) + doors.
+  // For single-image leaves: show the node tile as a self-tile + doors.
+  // For cluster nodes: show doors only.
   let frameTiles;
-  if (node.size === 1) {
+  const members = data.members || [];
+  if (members.length > 0) {
+    // Multi-image leaf: show each member image as a tile
+    const memberTiles = members.map(m => ({
+      node_id: m.image_id,
+      image_id: m.image_id,
+      level: node.level,
+      is_leaf: false,
+      size: 1,
+      tile_path: '',
+      thumb_url: m.thumb_url,
+      door_type: 'member',
+      tile_w: 512,
+      tile_h: 512,
+      _layout_weight: Math.max(1.5, data.doors.length * 0.3 / members.length),
+    }));
+    frameTiles = layoutAsGrid([...memberTiles, ...data.doors]);
+  } else if (node.size === 1) {
     const selfTile = {
       node_id: node.node_id,
       level: node.level,
@@ -2677,7 +2714,7 @@ function layoutAsGrid(doors) {
     for (let i = row.start; i < row.end; i++) {
       const d = doors[i];
       const tileW = (aspects[i] / row.aspectSum) * worldW;
-      result.push({
+      const entry = {
         node_id: d.node_id,
         rect: [x, y, tileW, rh],
         level: d.level,
@@ -2688,7 +2725,10 @@ function layoutAsGrid(doors) {
         child_ids: d.child_ids,
         tile_w: d.tile_w,
         tile_h: d.tile_h,
-      });
+      };
+      if (d.thumb_url) entry.thumb_url = d.thumb_url;
+      if (d.image_id) entry.image_id = d.image_id;
+      result.push(entry);
       x += tileW;
     }
     y += rh;

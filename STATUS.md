@@ -708,3 +708,16 @@
 - TestDoorStructure (4): required fields, all types present, no duplicates, nonexistent node safe
 - TestFlowGraphProperties (5): complete graph, symmetric reachability, stable ordering, empty zsummaries, single contrast
 - All 184 tests pass (154 existing + 30 new)
+
+### Leaf node member images fix (2026-02-06)
+- **Problem**: Clicking a multi-image leaf node (e.g., L1_0029 with 3 images) showed only lateral flow-neighbors. The node's own images — visible in its montage cover tile — vanished on entry. User reported: "the pink image looks like a cluster that i enter, yet i can't see any of the images on the 'cover' inside."
+- **Root cause**: `enterNode()` only had a `size === 1` branch for showing self-tiles. Multi-image leaves (size > 1) fell through to the else branch showing only doors. Additionally, `fromLevel` in the client was computed from `curFrame.level` (the frame's display level) instead of `parentNode.level` (the actual node level), causing back doors to fail cross-level lookup.
+- **Fix (viewer_server.py)**:
+  - Server: `handle_atlas_node_doors` now returns `members` list for leaf nodes with size > 1, each with `image_id`, `thumb_url`, `door_type: "member"`
+  - Client: `enterNode()` detects members and creates member tiles (non-clickable, loaded via `/thumbs/512/`) + layout weight so they dominate the first row
+  - Client: `tileCacheKey()` function handles both `node_id` and `image_id` cache keys
+  - Client: `tilePath()` supports `thumb_url` for member tiles
+  - Client: Fixed `fromLevel` to use `parentNode.level` for correct cross-level back door lookup
+  - Member tiles have `door_type: 'member'` — clicking them does nothing (like 'self' tiles)
+- **Result**: Entering L1_0029 now shows its 3 member images (yellow blocks, orange blur, pink wall) as large tiles in the top row, back door with amber border, and 8 lateral doors below. Cover images match inner view.
+- All 184 tests pass.
