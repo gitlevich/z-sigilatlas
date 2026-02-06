@@ -845,3 +845,27 @@ All 184 tests pass.
 - `tests/test_doors.py` — fixture generates proper root `meta.json`, 31 tests (1 new root back door test)
 
 All 185 tests pass.
+
+### Compact member layout: aspect-aware treemap + cover-fit (2026-02-06)
+
+**Problem**: Member images wasted ~28% of space as black bars. All declared 512x512 but actual aspect ratios range 0.59-4.7.
+
+**Server: thumbnail dimensions with members**:
+- `handle_atlas_node_doors()` batch-queries `images` table for `width, height`.
+- Computes thumbnail dimensions (long side=512, preserve ratio).
+- Each member now includes `thumb_w` and `thumb_h`.
+
+**Client: aspect-ratio treemap weights**:
+- Member `size` = `perMember * (thumb_w / thumb_h)` instead of equal weight.
+- Wider images get wider cells, tall images get taller cells.
+
+**Client: cover-fit for members**:
+- Members switched from contain-fit to cover-fit (`Math.max` scale + center-crop).
+- Showcase (full-size view) stays contain-fit.
+- Zero black bars in member grid. Minor center-cropping (~17% on 3:2 images).
+
+**Files modified**:
+- `sigiltree/viewer_server.py` — server: member dimension enrichment; client JS: aspect weights + cover-fit
+- `tests/test_doors.py` — 3 new tests (TestMemberDimensions)
+
+All 188 tests pass.

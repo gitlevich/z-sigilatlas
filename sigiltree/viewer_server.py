@@ -634,11 +634,42 @@ async def handle_atlas_node_doors(request: web.Request) -> web.Response:
     # can display them as clickable tiles. Works at every level, not just leaves.
     members = []
     if parent_node and parent_node.get("size", 0) > 1:
-        for iid in parent_node.get("image_ids", []):
+        image_ids = parent_node.get("image_ids", [])
+        # Batch-fetch original dimensions from DB for aspect-ratio-aware layout
+        dims: dict[str, tuple[int, int]] = {}
+        if image_ids:
+            try:
+                conn = db.open_db(artifact_dir)
+                try:
+                    placeholders = ",".join("?" * len(image_ids))
+                    cur = conn.execute(
+                        f"SELECT image_id, width, height FROM images "
+                        f"WHERE image_id IN ({placeholders})",
+                        image_ids,
+                    )
+                    for row in cur.fetchall():
+                        if row[1] and row[2]:
+                            dims[row[0]] = (row[1], row[2])
+                finally:
+                    conn.close()
+            except Exception:
+                pass  # Graceful fallback: members without dimensions
+
+        for iid in image_ids:
+            orig_w, orig_h = dims.get(iid, (512, 512))
+            # Thumbnail has long side = 512, preserve aspect ratio
+            if orig_w >= orig_h:
+                thumb_w = 512
+                thumb_h = max(1, round(512 * orig_h / orig_w))
+            else:
+                thumb_h = 512
+                thumb_w = max(1, round(512 * orig_w / orig_h))
             members.append({
                 "image_id": iid,
                 "thumb_url": f"/thumbs/512/{iid}.jpg",
                 "door_type": "member",
+                "thumb_w": thumb_w,
+                "thumb_h": thumb_h,
             })
 
     # Lateral doors: flow-neighbors at same level
@@ -2080,8 +2111,8 @@ function draw() {
     if (tc && tc.loaded) {
       const imgW = tc.img.naturalWidth;
       const imgH = tc.img.naturalHeight;
-      if (node.door_type === 'member' || node.door_type === 'showcase') {
-        // Individual photo: contain-fit, no cropping
+      if (node.door_type === 'showcase') {
+        // Full-size showcase: contain-fit, no cropping
         const scale = Math.min(iw / imgW, ih / imgH);
         const dw = imgW * scale;
         const dh = imgH * scale;
@@ -2092,6 +2123,14 @@ function draw() {
           ctx.fillRect(ix, iy, iw, ih);
         }
         ctx.drawImage(tc.img, 0, 0, imgW, imgH, dx, dy, dw, dh);
+      } else if (node.door_type === 'member') {
+        // Member in grid: cover-fit, fill cell with minor center-crop
+        const scale = Math.max(iw / imgW, ih / imgH);
+        const sw = iw / scale;
+        const sh = ih / scale;
+        const sx = (imgW - sw) / 2;
+        const sy = (imgH - sh) / 2;
+        ctx.drawImage(tc.img, sx, sy, sw, sh, ix, iy, iw, ih);
       } else {
         // Cover-fit: fill cell completely, center-crop excess.
         // Montage grids tolerate slight cropping; no black bars.
@@ -2687,18 +2726,24 @@ async function enterNode(node) {
   const members = data.members || [];
   if (members.length > 0) {
     const perMember = Math.max(1, Math.floor(selfWeight / members.length));
-    const memberTiles = members.map(m => ({
-      node_id: m.image_id,
-      image_id: m.image_id,
-      level: node.level,
-      is_leaf: false,
-      size: perMember,
-      tile_path: '',
-      thumb_url: m.thumb_url,
-      door_type: 'member',
-      tile_w: 512,
-      tile_h: 512,
-    }));
+    const memberTiles = members.map(m => {
+      const tw = m.thumb_w || 512;
+      const th = m.thumb_h || 512;
+      // Weight proportional to pixel area — wider images get wider cells
+      const aspectWeight = Math.round(perMember * (tw / th));
+      return {
+        node_id: m.image_id,
+        image_id: m.image_id,
+        level: node.level,
+        is_leaf: false,
+        size: Math.max(1, aspectWeight),
+        tile_path: '',
+        thumb_url: m.thumb_url,
+        door_type: 'member',
+        tile_w: tw,
+        tile_h: th,
+      };
+    });
     contentTiles = [...memberTiles, ...otherDoors];
   } else {
     const selfTile = {

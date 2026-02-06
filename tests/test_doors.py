@@ -734,3 +734,80 @@ class TestFlowGraphProperties:
         # a and b are close, c is far
         assert flow["a"][0] == "b", f"Expected b as a's closest, got {flow['a'][0]}"
         assert flow["b"][0] == "a", f"Expected a as b's closest, got {flow['b'][0]}"
+
+
+class TestMemberDimensions:
+    """Members include thumbnail dimensions from the database."""
+
+    @pytest.fixture
+    def atlas_dir_with_db(self, tmp_path):
+        """Atlas fixture with a catalog.db containing image dimensions."""
+        atlas_dir = _build_atlas(tmp_path, max_level=3)
+        from sigiltree import db
+        conn = db.open_db(atlas_dir)
+        try:
+            for i in range(128):
+                iid = f"img_{i:04d}"
+                # Alternate: even=landscape 3:2 (1500x1000), odd=portrait 2:3 (1000x1500)
+                w = 1500 if i % 2 == 0 else 1000
+                h = 1000 if i % 2 == 0 else 1500
+                conn.execute(
+                    "INSERT OR REPLACE INTO images "
+                    "(image_id, path, filename, width, height, checksum, file_size) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (iid, f"/fake/{iid}.jpg", f"{iid}.jpg", w, h, f"ck_{i}", 1000),
+                )
+            conn.commit()
+        finally:
+            conn.close()
+        return atlas_dir
+
+    @pytest.fixture
+    def atlas_app_with_db(self, atlas_dir_with_db):
+        return create_app(atlas_dir_with_db)
+
+    @pytest.mark.asyncio
+    async def test_members_have_thumb_dimensions(self, atlas_app_with_db):
+        """Member entries include thumb_w and thumb_h."""
+        async with TestClient(TestServer(atlas_app_with_db)) as client:
+            resp = await client.get("/api/atlas/node/n_000/doors?level=0")
+            data = await resp.json()
+            members = data.get("members", [])
+            assert len(members) > 0, "Expected members for n_000"
+            for m in members:
+                assert "thumb_w" in m, f"Member {m['image_id']} missing thumb_w"
+                assert "thumb_h" in m, f"Member {m['image_id']} missing thumb_h"
+                assert m["thumb_w"] > 0
+                assert m["thumb_h"] > 0
+                assert max(m["thumb_w"], m["thumb_h"]) == 512
+
+    @pytest.mark.asyncio
+    async def test_member_dimensions_reflect_aspect_ratio(self, atlas_app_with_db):
+        """Landscape images get thumb_w=512, portrait images get thumb_h=512."""
+        async with TestClient(TestServer(atlas_app_with_db)) as client:
+            resp = await client.get("/api/atlas/node/n_000/doors?level=0")
+            data = await resp.json()
+            members = data.get("members", [])
+            for m in members:
+                idx = int(m["image_id"].split("_")[1])
+                if idx % 2 == 0:
+                    # Landscape 3:2 -> thumb_w=512, thumb_h=341
+                    assert m["thumb_w"] == 512, f"img_{idx:04d} landscape thumb_w"
+                    assert m["thumb_h"] == 341, f"img_{idx:04d} landscape thumb_h"
+                else:
+                    # Portrait 2:3 -> thumb_w=341, thumb_h=512
+                    assert m["thumb_w"] == 341, f"img_{idx:04d} portrait thumb_w"
+                    assert m["thumb_h"] == 512, f"img_{idx:04d} portrait thumb_h"
+
+    @pytest.mark.asyncio
+    async def test_members_without_db_get_defaults(self, atlas_app):
+        """When no catalog.db exists, members still appear (with default 512x512)."""
+        async with TestClient(TestServer(atlas_app)) as client:
+            resp = await client.get("/api/atlas/node/n_000/doors?level=0")
+            data = await resp.json()
+            members = data.get("members", [])
+            assert len(members) > 0
+            for m in members:
+                # Default fallback when DB query fails
+                assert m["thumb_w"] == 512
+                assert m["thumb_h"] == 512
