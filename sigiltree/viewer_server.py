@@ -2363,35 +2363,7 @@ function draw() {
       ctx.strokeRect(ix, iy, iw, ih);
     }
 
-    // Label: descriptive name + count
-    if (iw > 60 && ih > 24) {
-      const lvl = currentLevel();
-      const lvlLabels = nodeLabels[lvl];
-      const descLabel = lvlLabels ? lvlLabels[node.node_id] : null;
-      const fontSize = Math.max(9, Math.min(14, iw / 7));
-      ctx.font = `bold ${fontSize}px system-ui`;
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'middle';
-      const cx = ix + iw / 2;
-      const cy = iy + ih / 2;
-      if (descLabel && iw > 80) {
-        // Draw text with shadow for readability
-        ctx.fillStyle = 'rgba(0,0,0,0.6)';
-        ctx.fillText(descLabel, cx + 1, cy - fontSize * 0.4 + 1);
-        ctx.fillStyle = 'rgba(255,255,255,0.85)';
-        ctx.fillText(descLabel, cx, cy - fontSize * 0.4);
-        // Count below
-        ctx.font = `${fontSize * 0.8}px system-ui`;
-        ctx.fillStyle = 'rgba(0,0,0,0.5)';
-        ctx.fillText(`${node.size}`, cx + 1, cy + fontSize * 0.6 + 1);
-        ctx.fillStyle = 'rgba(200,200,200,0.6)';
-        ctx.fillText(`${node.size}`, cx, cy + fontSize * 0.6);
-      } else {
-        ctx.fillStyle = hasChildren ? 'rgba(200,200,200,0.7)' : 'rgba(200,200,200,0.4)';
-        ctx.fillText(`${node.size}`, cx, cy);
-      }
-      ctx.textBaseline = 'alphabetic';
-    }
+    // Labels removed — radar chart on hover communicates identity
   }
 
   if (hoveredNode && !dragging) drawRadar(hoveredNode);
