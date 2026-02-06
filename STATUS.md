@@ -4,7 +4,37 @@
 
 ## Session Recovery Context (2026-02-06)
 
-### What just happened — Treemap layout restored at every level
+### What just happened — Unlimited depth + hierarchy-first viewer
+
+**Problem**: n_014 (112 images, largest L0 neighborhood) appeared as a wall of undifferentiated images despite having 10 well-defined sub-clusters. Two root causes:
+
+1. **`max_levels=4` cap**: Atlas artificially stopped at 4 levels. With 874 images, the tree needed 5 levels to reach natural leaf termination.
+2. **View flattened members**: When entering any node, the viewer showed ALL individual member images mixed with child doors. The clustering hierarchy was invisible.
+
+**Fix 1 — atlas.py: unlimited depth**:
+- `build_atlas_recursive()` default changed from `max_levels=4` to `max_levels=None` (unlimited).
+- Loop changed from `for lvl in range(1, max_levels)` to `while True` with `break` when cap reached or no splittable nodes remain.
+- Natural stopping: `MIN_SPLIT_SIZE=4` + Louvain failure drive termination.
+- CLI `--levels` default changed to `None` (unlimited). Passing `--levels N` still caps depth.
+- Tests still pass — they pass explicit `max_levels` values.
+
+**Fix 2 — viewer_server.py: show children, not members, for non-leaf nodes**:
+- `enterNode()` now checks `hasDown` (whether node has child doors).
+- If `hasDown`: show sub-neighborhoods as primary content (children ARE the view).
+- If no children + has members: show individual member images (leaf behavior).
+- Members only appear at leaf nodes where there's nothing deeper to show.
+
+**Rebuild results**:
+- Atlas: 5 levels (was 4), 960 nodes (was 865), stopped naturally at level 4 (all 94 L4 nodes are leaves).
+- Ride stats rebuilt for 5 levels.
+- All 188 tests pass.
+
+**Files changed**:
+- `sigiltree/atlas.py` — `build_atlas_recursive()` signature + loop
+- `sigiltree/cli.py` — `--levels` default + dispatch logic
+- `sigiltree/viewer_server.py` — `enterNode()` content tile selection (JS)
+
+### Previous: Treemap layout restored at every level
 - **Root cause**: `layoutAsGrid()` (commit a836289) replaced treemap rects with a uniform justified-row grid, destroying the spatial organization by similarity.
 - **Fix**: Ported squarified treemap algorithm (Bruls-Huizing-van Wijk 2000) from `atlas.py` to client-side JS. New `squarifiedTreemap()`, `_squarify()`, `_worstRatio()` + `layoutAsTreemap()` wrapper.
 - **Root init**: Uses `meta.nodes` directly (they carry pre-computed treemap rects from atlas build).
@@ -33,7 +63,7 @@
 
 ### Architecture
 - aiohttp server, single file, all JS/CSS inline in raw Python string
-- Atlas: L0 (35 nodes) → L1 (74) → L2 (120) → L3 (25 leaves). 250 images total.
+- Atlas: L0 (21) → L1 (123) → L2 (275) → L3 (447) → L4 (94 leaves). 874 images, 960 nodes.
 - Every node is a sigil with doors (back/down/lateral). No dead ends.
 - Doors endpoint: `GET /api/atlas/node/{id}/doors?level=N&from_node=X&from_level=Y`
 - Tile images: montage composites at higher levels, single images at leaf level

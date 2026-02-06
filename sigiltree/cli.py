@@ -56,12 +56,14 @@ def cmd_atlas(args):
     if not artifacts.is_dir():
         print(f"Artifact dir not found: {artifacts}", file=sys.stderr)
         sys.exit(1)
-    if args.levels <= 1:
+    if args.levels is not None and args.levels <= 1:
         from sigiltree.atlas import build_atlas
         stats = build_atlas(artifacts, level=0, seed=args.seed)
     else:
         from sigiltree.atlas import build_atlas_recursive
-        stats = build_atlas_recursive(artifacts, max_levels=args.levels, seed=args.seed)
+        stats = build_atlas_recursive(
+            artifacts, max_levels=args.levels, seed=args.seed,
+        )
     return stats
 
 
@@ -132,7 +134,8 @@ def main():
 
     p_atlas = sub.add_parser("atlas", help="Build atlas levels")
     p_atlas.add_argument("artifact_dir", help="Path to artifact directory")
-    p_atlas.add_argument("--levels", type=int, default=1, help="Number of levels to build")
+    p_atlas.add_argument("--levels", type=int, default=None,
+                         help="Max levels to build (default: unlimited, recurse until leaves)")
     p_atlas.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility")
 
     sub.add_parser("ride-stats", help="Precompute ride z-summaries and correlations").add_argument(

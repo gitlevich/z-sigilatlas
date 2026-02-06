@@ -2721,10 +2721,17 @@ async function enterNode(node) {
   const totalDoorWeight = otherDoors.reduce((s, d) => s + Math.max(1, d.size || 1), 0);
   const selfWeight = Math.max(totalDoorWeight * 3, 10);
 
-  // Build content tiles (members or self + other doors)
+  // Build content tiles.
+  // Non-leaf nodes: show children (down doors) as primary content so
+  // the clustering hierarchy is visible. Individual member images only
+  // appear when entering a leaf node that has no children.
   let contentTiles;
   const members = data.members || [];
-  if (members.length > 0) {
+  if (hasDown) {
+    // Node has children — show sub-neighborhoods, not individual images
+    contentTiles = [...otherDoors];
+  } else if (members.length > 0) {
+    // Leaf node — show individual member images
     const perMember = Math.max(1, Math.floor(selfWeight / members.length));
     const memberTiles = members.map(m => {
       const tw = m.thumb_w || 512;

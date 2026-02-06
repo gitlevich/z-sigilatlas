@@ -833,10 +833,14 @@ def _build_level_nodes(
 
 def build_atlas_recursive(
     artifact_dir: Path,
-    max_levels: int = 4,
+    max_levels: int | None = None,
     seed: int = 42,
 ) -> dict:
-    """Build a multiscale atlas pyramid with up to max_levels levels.
+    """Build a multiscale atlas pyramid.
+
+    Recursion continues until every node is a leaf (smaller than
+    MIN_SPLIT_SIZE or indivisible). An optional *max_levels* cap
+    can be passed to bound depth (useful for tests).
 
     Level 0 is the full-corpus coarse mosaic. Each subsequent level
     splits non-leaf nodes into finer neighborhoods.
@@ -861,7 +865,11 @@ def build_atlas_recursive(
     }]
 
     current_parents = level0_nodes
-    for lvl in range(1, max_levels):
+    lvl = 0
+    while True:
+        lvl += 1
+        if max_levels is not None and lvl >= max_levels:
+            break
         splittable = [n for n in current_parents if not n.is_leaf]
         if not splittable:
             log.info("No splittable nodes at level %d, stopping", lvl - 1)
