@@ -516,10 +516,13 @@ async def handle_flow_neighbors(request: web.Request) -> web.Response:
 
 def _cached_meta(app, artifact_dir, level):
     """Load atlas meta with app-level caching. Enriches nodes with tile dimensions."""
-    from sigiltree.atlas import load_atlas_meta
+    from sigiltree.atlas import load_atlas_meta, load_root_meta
     cache = app["_meta_cache"]
     if level not in cache:
-        meta = load_atlas_meta(artifact_dir, level=level)
+        if level == -1:
+            meta = load_root_meta(artifact_dir)
+        else:
+            meta = load_atlas_meta(artifact_dir, level=level)
         if meta:
             _enrich_tile_dimensions(meta, artifact_dir, level)
         cache[level] = meta
@@ -529,11 +532,12 @@ def _cached_meta(app, artifact_dir, level):
 def _enrich_tile_dimensions(meta, artifact_dir, level):
     """Add tile_w and tile_h to each node by reading tile image headers."""
     from PIL import Image
+    level_dir = "root" if level == -1 else f"level{level}"
     for node in meta.get("nodes", []):
         tile_path = node.get("tile_path", "")
         if not tile_path:
             continue
-        full_path = artifact_dir / "atlas" / f"level{level}" / tile_path
+        full_path = artifact_dir / "atlas" / level_dir / tile_path
         if not full_path.exists():
             continue
         try:
@@ -584,7 +588,10 @@ async def handle_atlas_node_doors(request: web.Request) -> web.Response:
 
     doors = []
 
-    # Back door: the sigil we came from (may be at a different level)
+    # Back door: the sigil we came from (may be at a different level).
+    # Every view always has a back door — if from_node is not provided
+    # or not found, the back door is the root sigil (the entire corpus).
+    back_found = False
     if from_node:
         back_level = int(from_level) if from_level else level
         for search_level in ([back_level, level] if back_level != level else [level]):
@@ -596,7 +603,15 @@ async def handle_atlas_node_doors(request: web.Request) -> web.Response:
                 )
                 if back_node:
                     doors.append({**back_node, "door_type": "back"})
+                    back_found = True
                     break
+
+    if not back_found:
+        # Root back door: the corpus sigil, loaded from atlas/root/meta.json
+        root_meta = _cached_meta(request.app, artifact_dir, -1)
+        if root_meta and root_meta.get("nodes"):
+            root_node = root_meta["nodes"][0]
+            doors.append({**root_node, "door_type": "back"})
 
     # Down doors: children of this node
     parent_meta = _cached_meta(request.app, artifact_dir, level)
@@ -747,6 +762,9 @@ async def handle_image_full(request: web.Request) -> web.Response:
 async def handle_atlas_tile(request: web.Request) -> web.Response:
     artifact_dir = request.app["artifact_dir"]
     tile_rel = request.match_info["path"]
+    # Map level-1 (root sigil) to the root directory
+    if tile_rel.startswith("level-1/"):
+        tile_rel = "root/" + tile_rel[len("level-1/"):]
     # Support multi-level tile paths: level{L}/tiles/...
     tile_path = artifact_dir / "atlas" / tile_rel
     if not tile_path.exists():
@@ -1635,7 +1653,6 @@ let viewStack = [];
 
 // Tile cache: node_id -> { img, loaded, lastUsed }
 // LRU eviction keeps memory bounded.
-const TILE_CACHE_MAX = 50;
 let tileCache = {};
 
 // Level 0 nodes (for minimap)
@@ -1977,39 +1994,29 @@ function tilePath(node) {
 }
 
 function tileCacheKey(node) {
-  return node.image_id || node.node_id;
+  return node._snapshotKey || node.image_id || node.node_id;
 }
 
 function ensureTile(node) {
   const key = tileCacheKey(node);
-  const cached = tileCache[key];
-  if (cached) { cached.lastUsed = performance.now(); return; }
-  evictTiles();
+  if (tileCache[key]) return;
+  // Snapshot tiles are pre-built — just register them
+  if (node._snapshotImg) {
+    tileCache[key] = { img: node._snapshotImg, loaded: true };
+    return;
+  }
   const img = new window.Image();
-  tileCache[key] = { img: img, loaded: false, lastUsed: performance.now() };
-  img.onload = () => {
-    tileCache[key].loaded = true;
-    scheduleFrame();
-  };
+  tileCache[key] = { img, loaded: false };
+  img.onload = () => { tileCache[key].loaded = true; scheduleFrame(); };
   img.onerror = () => {};
   img.src = tilePath(node);
 }
 
-function evictTiles() {
-  const keys = Object.keys(tileCache);
-  if (keys.length < TILE_CACHE_MAX) return;
-  // Keep tiles visible in the current frame
-  const visible = new Set((currentNodes() || []).map(n => tileCacheKey(n)));
-  // Sort by lastUsed ascending (oldest first)
-  const evictable = keys.filter(k => !visible.has(k))
-    .sort((a, b) => (tileCache[a].lastUsed || 0) - (tileCache[b].lastUsed || 0));
-  // Evict oldest half
-  const toEvict = evictable.slice(0, Math.max(1, Math.floor(evictable.length / 2)));
-  for (const k of toEvict) {
-    const tc = tileCache[k];
-    if (tc.img) { tc.img.onload = null; tc.img.src = ''; }
-    delete tileCache[k];
-  }
+function captureSnapshot() {
+  // Capture the current canvas as an Image for use as a back door tile
+  const img = new window.Image();
+  img.src = canvas.toDataURL('image/jpeg', 0.7);
+  return img;
 }
 
 function prefetchTiles() {
@@ -2585,6 +2592,7 @@ async function enterNode(node) {
 
   // Member image: fixed layout — back door left strip, image fills the rest
   if (node.door_type === 'member') {
+    const memberSnapshot = captureSnapshot();
     const curFrame = currentFrame();
     const backNode = curFrame?.parentNode;
     const backStrip = 0.08; // 8% width for back door strip on left
@@ -2604,11 +2612,14 @@ async function enterNode(node) {
       rect: [backNode ? backStrip : 0, 0, backNode ? 1 - backStrip : 1, 1],
     });
     if (backNode) {
+      const snapshotKey = '__snapshot_' + viewStack.length + '__';
       frameTiles.push({
         ...backNode,
         door_type: 'back',
         size: 1,
         rect: [0, 0, backStrip, backStrip],
+        _snapshotKey: snapshotKey,
+        _snapshotImg: memberSnapshot,
       });
     }
     viewStack.push({
@@ -2643,6 +2654,9 @@ async function enterNode(node) {
   // Silent calibration: record every node entry
   recordFlythroughVisit(node);
 
+  // Capture current view as snapshot before transitioning
+  const snapshot = captureSnapshot();
+
   const curFrame = currentFrame();
 
   // Fetch doors: back + down (children) + lateral (flow-neighbors)
@@ -2661,28 +2675,9 @@ async function enterNode(node) {
   const frameLevel = hasDown ? level + 1 : level;
 
   // Layout: back door fixed top-left, everything else in remaining space.
-  let backDoor = data.doors.find(d => d.door_type === 'back');
+  // The server always returns a back door (root sigil if no from_node).
+  const backDoor = data.doors.find(d => d.door_type === 'back');
   const otherDoors = data.doors.filter(d => d.door_type !== 'back');
-
-  // Synthetic back door: when entering from root, server has no from_node
-  // so it returns no back door. Show the place we came from — the largest
-  // node in the previous frame, which is the most prominent visual the
-  // user was looking at before clicking.
-  if (!backDoor && viewStack.length > 0) {
-    const prevFrame = viewStack[viewStack.length - 1];
-    const prevNodes = prevFrame.nodes || [];
-    const biggest = prevNodes.reduce((a, b) =>
-      (b.size || 0) > (a.size || 0) ? b : a, prevNodes[0]);
-    backDoor = {
-      node_id: '__back_to_parent__',
-      door_type: 'back',
-      size: 1,
-      level: biggest ? biggest.level : 0,
-      tile_path: biggest ? biggest.tile_path || '' : '',
-      tile_w: biggest ? biggest.tile_w || 1024 : 1024,
-      tile_h: biggest ? biggest.tile_h || 1024 : 1024,
-    };
-  }
 
   const totalDoorWeight = otherDoors.reduce((s, d) => s + Math.max(1, d.size || 1), 0);
   const selfWeight = Math.max(totalDoorWeight * 3, 10);
@@ -2725,10 +2720,13 @@ async function enterNode(node) {
   let frameTiles = layoutAsTreemap(contentTiles, [backStrip, 0, 1 - backStrip, 1]);
 
   if (backDoor) {
+    const snapshotKey = '__snapshot_' + viewStack.length + '__';
     frameTiles.push({
       ...backDoor,
       door_type: 'back',
       rect: [0, 0, backStrip, backStrip],
+      _snapshotKey: snapshotKey,
+      _snapshotImg: snapshot,
     });
   }
 

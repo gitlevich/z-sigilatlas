@@ -679,6 +679,12 @@ def build_atlas(
 
     meta_path = atlas_dir / "meta.json"
     meta_path.write_text(json.dumps(meta, indent=2))
+
+    # Root sigil: the corpus node that parents all L0 neighborhoods
+    if level == 0:
+        l0_node_ids = [n.node_id for n in nodes]
+        _save_root_node(artifact_dir, image_ids, l0_node_ids)
+
     log.info("Atlas level %d built: %d neighborhoods in %.1fs. Saved to %s",
              level, len(nodes), elapsed, meta_path)
 
@@ -889,6 +895,13 @@ def build_atlas_recursive(
 
         current_parents = child_nodes
 
+    # Root sigil: the corpus node that parents all L0 neighborhoods
+    all_image_ids = []
+    for n in level0_nodes:
+        all_image_ids.extend(n.image_ids)
+    l0_node_ids = [n.node_id for n in level0_nodes]
+    _save_root_node(artifact_dir, all_image_ids, l0_node_ids)
+
     elapsed = time.monotonic() - t0
 
     # Write manifest
@@ -939,6 +952,63 @@ def _save_level_meta(
 # ---------------------------------------------------------------------------
 # Load / verify
 # ---------------------------------------------------------------------------
+
+def _save_root_node(
+    artifact_dir: Path,
+    image_ids: list[str],
+    l0_node_ids: list[str],
+) -> None:
+    """Save the root sigil — the corpus node that contains all L0 neighborhoods.
+
+    Stored at atlas/root/meta.json with a single node. The root is a sigil
+    like any other: it has image_ids, a tile, and child_ids.
+    """
+    _ensure_heavy_imports()
+
+    root_dir = artifact_dir / "atlas" / "root"
+    tiles_dir = root_dir / "tiles"
+    tiles_dir.mkdir(parents=True, exist_ok=True)
+
+    # Render root tile
+    tile_path = tiles_dir / "root_tile.jpg"
+    render_neighborhood_tile(image_ids, 1024, 1024, artifact_dir, tile_path)
+
+    # Pick representatives (first 9 images, same as other levels)
+    rep_ids = image_ids[:9]
+
+    root_node = AtlasNode(
+        node_id="__root__",
+        image_ids=image_ids,
+        size=len(image_ids),
+        order_key=0.0,
+        rect=(0.0, 0.0, 1.0, 1.0),
+        tile_path="tiles/root_tile.jpg",
+        representative_ids=rep_ids,
+        neighbor_ids=[],
+        level=-1,
+        parent_id=None,
+        child_ids=l0_node_ids,
+        is_leaf=False,
+    )
+
+    meta = {
+        "corpus_size": len(image_ids),
+        "n_neighborhoods": 1,
+        "nodes": [asdict(root_node)],
+    }
+    meta_path = root_dir / "meta.json"
+    meta_path.write_text(json.dumps(meta, indent=2))
+    log.info("Root sigil: %d images, %d children -> %s",
+             len(image_ids), len(l0_node_ids), meta_path)
+
+
+def load_root_meta(artifact_dir: Path) -> dict | None:
+    """Load the root sigil metadata from atlas/root/meta.json."""
+    meta_path = artifact_dir / "atlas" / "root" / "meta.json"
+    if not meta_path.exists():
+        return None
+    return json.loads(meta_path.read_text())
+
 
 def load_atlas_manifest(artifact_dir: Path) -> dict | None:
     """Load the top-level atlas manifest. Synthesizes from level 0 if needed."""

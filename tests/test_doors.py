@@ -165,6 +165,32 @@ def _build_atlas(tmp_path, max_level=3):
         }
         (level_dir / "meta.json").write_text(json.dumps(meta))
 
+    # Root sigil — a proper node like any other
+    root_dir = atlas_dir / "root"
+    tiles_dir = root_dir / "tiles"
+    tiles_dir.mkdir(parents=True)
+    (tiles_dir / "root_tile.jpg").write_bytes(b"FAKE_ROOT_TILE")
+    l0_node_ids = [n["node_id"] for n in l0_nodes]
+    root_meta = {
+        "corpus_size": 128,
+        "n_neighborhoods": 1,
+        "nodes": [{
+            "node_id": "__root__",
+            "image_ids": image_ids,
+            "size": 128,
+            "order_key": 0.0,
+            "rect": [0.0, 0.0, 1.0, 1.0],
+            "tile_path": "tiles/root_tile.jpg",
+            "representative_ids": image_ids[:9],
+            "neighbor_ids": [],
+            "level": -1,
+            "parent_id": None,
+            "child_ids": l0_node_ids,
+            "is_leaf": False,
+        }],
+    }
+    (root_dir / "meta.json").write_text(json.dumps(root_meta))
+
     # Manifest
     manifest = {
         "max_level": max_level,
@@ -289,12 +315,23 @@ class TestBackDoor:
             assert back[0]["node_id"] == "n_000"
 
     @pytest.mark.asyncio
-    async def test_back_door_absent_without_from_node(self, atlas_app):
-        """No from_node -> no back door (root entry)."""
+    async def test_root_back_door_without_from_node(self, atlas_app):
+        """No from_node -> root back door (the corpus sigil)."""
         async with TestClient(TestServer(atlas_app)) as client:
             doors = await _get_doors(client, "n_000", 0)
             back = [d for d in doors if d["door_type"] == "back"]
-            assert len(back) == 0
+            assert len(back) == 1, "Should always have a back door"
+            assert back[0]["node_id"] == "__root__"
+            assert back[0]["level"] == -1
+            assert back[0]["tile_path"] == "tiles/root_tile.jpg"
+
+    @pytest.mark.asyncio
+    async def test_root_back_door_has_corpus_size(self, atlas_app):
+        """Root back door carries the full corpus size."""
+        async with TestClient(TestServer(atlas_app)) as client:
+            doors = await _get_doors(client, "n_000", 0)
+            back = [d for d in doors if d["door_type"] == "back"]
+            assert back[0]["size"] == 128
 
     @pytest.mark.asyncio
     async def test_back_door_cross_level(self, atlas_app):
@@ -558,7 +595,7 @@ class TestDoorStructure:
 
     @pytest.mark.asyncio
     async def test_door_has_required_fields(self, atlas_app):
-        """Every door dict has node_id, level, door_type, rect, tile_path."""
+        """Every door dict has node_id, level, door_type, and a tile source."""
         async with TestClient(TestServer(atlas_app)) as client:
             doors = await _get_doors(client, "n_000", 0)
             for d in doors:
@@ -568,8 +605,9 @@ class TestDoorStructure:
                 assert d["door_type"] in ("back", "down", "lateral"), (
                     f"Invalid door_type: {d['door_type']}"
                 )
-                assert "rect" in d, f"Door missing rect: {d}"
-                assert "tile_path" in d, f"Door missing tile_path: {d}"
+                # Every door needs a tile source: either tile_path or thumb_url
+                has_tile = "tile_path" in d or "thumb_url" in d
+                assert has_tile, f"Door missing tile source: {d}"
 
     @pytest.mark.asyncio
     async def test_door_types_exhaustive(self, atlas_app):

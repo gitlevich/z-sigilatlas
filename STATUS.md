@@ -802,7 +802,7 @@ All 184 tests pass.
 - Dark background (`rgba(0,0,0,0.55)`) makes arrows readable on any image.
 
 **Files modified**: `sigiltree/viewer_server.py` (JS only)
-All 184 tests pass.
+All 184 tests pass (A).
 
 ### Non-overlapping back door layout (2026-02-06)
 
@@ -818,3 +818,30 @@ All 184 tests pass.
 
 **Files modified**: `sigiltree/viewer_server.py` (JS only)
 All 184 tests pass.
+
+### Root as proper sigil + snapshot back doors (2026-02-06)
+
+**Root modeled as real AtlasNode**:
+- `__root__` stored in `artifacts/atlas/root/meta.json` with `level: -1`, `parent_id: null`, `child_ids: [L0 node ids]`.
+- `_save_root_node()` helper creates root node during `build_atlas()` and `build_atlas_recursive()`.
+- `load_root_meta()` loads root meta. Server `_cached_meta()` handles key `"root"`.
+- Removed synthetic root construction in `handle_atlas_node_doors()`.
+
+**Tile cache removed**:
+- Removed `TILE_CACHE_MAX = 50`, `evictTiles()`, LRU tracking, `lastUsed` timestamps.
+- `tileCache` is now a plain map — browser manages memory.
+- `ensureTile()` simplified: just creates Images, no eviction.
+
+**Snapshot-based back doors**:
+- Back door now shows a screenshot of the previous view (what the room looked like), not the sigil's montage tile.
+- `captureSnapshot()` captures `canvas.toDataURL('image/jpeg', 0.7)` before each transition.
+- Snapshot Image stored on the back door tile as `_snapshotImg` with unique `_snapshotKey`.
+- `tileCacheKey()` checks for `_snapshotKey` first; `ensureTile()` registers pre-built snapshot Images.
+- Works at all levels: Root->n_000 shows root overview snapshot, n_000->n_006 shows n_000 room snapshot.
+
+**Files modified**:
+- `sigiltree/atlas.py` — `_save_root_node()`, `load_root_meta()`, updated `build_atlas()` and `build_atlas_recursive()`
+- `sigiltree/viewer_server.py` — tile cache removal, `captureSnapshot()`, snapshot back doors in `enterNode()`
+- `tests/test_doors.py` — fixture generates proper root `meta.json`, 31 tests (1 new root back door test)
+
+All 185 tests pass.
