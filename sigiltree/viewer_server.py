@@ -1605,6 +1605,33 @@ let sigilFetching = false;
 // Node labels: descriptive text per node from z-summaries
 let nodeLabels = {};        // {level: {node_id: string}}
 
+// Z-summaries for radar chart: {level: {contrast: {node_id: {z_mean, z_std, n}}}}
+let nodeZsummaries = {};
+// Radar axes: curated subset of contrasts for the radar chart
+const RADAR_AXES = [
+  { key: 'brightness',                label: 'bright' },
+  { key: 'temperature',               label: 'warm' },
+  { key: 'sharpness',                 label: 'sharp' },
+  { key: 'saturation',                label: 'saturated' },
+  { key: 'contrast',                  label: 'contrast' },
+  { key: 'texture_scale',             label: 'coarse' },
+  { key: 'sem_simple_vs_complex',     label: 'complex' },
+  { key: 'sem_natural_vs_manmade',    label: 'manmade' },
+  { key: 'sem_closeup_vs_wide',       label: 'wide' },
+  { key: 'sem_abstract_vs_representational', label: 'repr.' },
+];
+
+async function fetchZsummaries(level) {
+  if (nodeZsummaries[level]) return;
+  try {
+    const r = await fetch(`/api/ride/stats?level=${level}`);
+    if (!r.ok) return;
+    const data = await r.json();
+    nodeZsummaries[level] = data.zsummaries || {};
+    scheduleFrame();
+  } catch (e) { /* z-summaries are optional */ }
+}
+
 async function fetchNodeLabels(level) {
   if (nodeLabels[level]) return;
   try {
@@ -2367,8 +2394,136 @@ function draw() {
     }
   }
 
+  if (hoveredNode && !dragging) drawRadar(hoveredNode);
   drawMinimap();
   drawDebug();
+}
+
+// ---------------------------------------------------------------------------
+// Radar chart: neighborhood contrast profile on hover
+// ---------------------------------------------------------------------------
+
+function drawRadar(node) {
+  const lvl = currentLevel();
+  const zs = nodeZsummaries[lvl];
+  if (!zs) return;
+
+  // Gather values for this node across radar axes
+  const values = [];
+  const labels = [];
+  for (const axis of RADAR_AXES) {
+    const contrastData = zs[axis.key];
+    if (!contrastData) continue;
+    const nodeData = contrastData[node.node_id];
+    if (!nodeData) continue;
+    // Clamp z_mean to [-2.5, 2.5] and normalize to [0, 1]
+    const clamped = Math.max(-2.5, Math.min(2.5, nodeData.z_mean));
+    values.push((clamped + 2.5) / 5.0);
+    labels.push(axis.label);
+  }
+  if (values.length < 3) return;
+
+  const n = values.length;
+  const cw = canvas.clientWidth;
+  const ch = canvas.clientHeight;
+
+  // Position: top-left corner, offset from edge
+  const centerX = 90;
+  const centerY = 90;
+  const radius = 60;
+  const angleStep = (2 * Math.PI) / n;
+  const startAngle = -Math.PI / 2;  // 12 o'clock
+
+  // Background disc
+  ctx.save();
+  ctx.globalAlpha = 0.85;
+  ctx.fillStyle = '#111';
+  ctx.beginPath();
+  ctx.arc(centerX, centerY, radius + 28, 0, 2 * Math.PI);
+  ctx.fill();
+  ctx.globalAlpha = 1.0;
+
+  // Grid rings
+  ctx.strokeStyle = 'rgba(255,255,255,0.08)';
+  ctx.lineWidth = 0.5;
+  for (const r of [0.25, 0.5, 0.75, 1.0]) {
+    ctx.beginPath();
+    ctx.arc(centerX, centerY, radius * r, 0, 2 * Math.PI);
+    ctx.stroke();
+  }
+
+  // Middle ring (z=0) slightly brighter
+  ctx.strokeStyle = 'rgba(255,255,255,0.2)';
+  ctx.lineWidth = 0.75;
+  ctx.beginPath();
+  ctx.arc(centerX, centerY, radius * 0.5, 0, 2 * Math.PI);
+  ctx.stroke();
+
+  // Spokes
+  ctx.strokeStyle = 'rgba(255,255,255,0.06)';
+  ctx.lineWidth = 0.5;
+  for (let i = 0; i < n; i++) {
+    const angle = startAngle + i * angleStep;
+    ctx.beginPath();
+    ctx.moveTo(centerX, centerY);
+    ctx.lineTo(centerX + Math.cos(angle) * radius, centerY + Math.sin(angle) * radius);
+    ctx.stroke();
+  }
+
+  // Data polygon
+  ctx.beginPath();
+  for (let i = 0; i < n; i++) {
+    const angle = startAngle + i * angleStep;
+    const r = values[i] * radius;
+    const x = centerX + Math.cos(angle) * r;
+    const y = centerY + Math.sin(angle) * r;
+    if (i === 0) ctx.moveTo(x, y);
+    else ctx.lineTo(x, y);
+  }
+  ctx.closePath();
+  ctx.fillStyle = 'rgba(100,200,255,0.15)';
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(100,200,255,0.6)';
+  ctx.lineWidth = 1.5;
+  ctx.stroke();
+
+  // Data points
+  for (let i = 0; i < n; i++) {
+    const angle = startAngle + i * angleStep;
+    const r = values[i] * radius;
+    const x = centerX + Math.cos(angle) * r;
+    const y = centerY + Math.sin(angle) * r;
+    ctx.fillStyle = 'rgba(100,200,255,0.8)';
+    ctx.beginPath();
+    ctx.arc(x, y, 2, 0, 2 * Math.PI);
+    ctx.fill();
+  }
+
+  // Axis labels
+  ctx.font = '9px system-ui';
+  ctx.textBaseline = 'middle';
+  ctx.fillStyle = 'rgba(200,200,200,0.7)';
+  for (let i = 0; i < n; i++) {
+    const angle = startAngle + i * angleStep;
+    const lx = centerX + Math.cos(angle) * (radius + 14);
+    const ly = centerY + Math.sin(angle) * (radius + 14);
+    // Align text based on position
+    if (Math.abs(Math.cos(angle)) < 0.3) ctx.textAlign = 'center';
+    else if (Math.cos(angle) > 0) ctx.textAlign = 'left';
+    else ctx.textAlign = 'right';
+    ctx.fillText(labels[i], lx, ly);
+  }
+
+  // Node label in center
+  const lvlLabels = nodeLabels[lvl];
+  const descLabel = lvlLabels ? lvlLabels[node.node_id] : node.node_id;
+  ctx.font = 'bold 10px system-ui';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillStyle = 'rgba(255,255,255,0.5)';
+  ctx.fillText(descLabel || node.node_id, centerX, centerY + radius + 22);
+
+  ctx.restore();
 }
 
 // ---------------------------------------------------------------------------
@@ -2585,6 +2740,7 @@ async function init() {
     fitOverview();
     updateBreadcrumb();
     fetchNodeLabels(0);
+    fetchZsummaries(0);
     scheduleFrame();
   } catch (e) {
     document.getElementById('stats').textContent = 'Error loading atlas: ' + e.message;
@@ -2659,6 +2815,7 @@ async function enterNode(node) {
     fetchSigilScores(node.level + 1);
   }
   fetchNodeLabels(node.level + 1);
+  fetchZsummaries(node.level + 1);
 }
 
 function exitToParent() {
