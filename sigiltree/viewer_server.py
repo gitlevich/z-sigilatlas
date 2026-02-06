@@ -73,6 +73,7 @@ def create_app(artifact_dir: Path) -> web.Application:
     app.router.add_get("/api/atlas/flow_neighbors", handle_flow_neighbors)
     app.router.add_get("/api/atlas/node/{node_id}/doors", handle_atlas_node_doors)
     app.router.add_get("/api/atlas/node_labels", handle_atlas_node_labels)
+    app.router.add_get("/api/image/{image_id}/full", handle_image_full)
     app.router.add_get("/atlas_tiles/{path:.*}", handle_atlas_tile)
     app.router.add_static(
         "/thumbs", str(artifact_dir / "thumbnails"), show_index=False
@@ -614,10 +615,10 @@ async def handle_atlas_node_doors(request: web.Request) -> web.Response:
                 for child in children:
                     doors.append({**child, "door_type": "down"})
 
-    # Member images: for leaf nodes with multiple images, expose them
-    # so the client can display the node's actual content alongside doors.
+    # Member images: expose the node's actual photographs so the client
+    # can display them as clickable tiles. Works at every level, not just leaves.
     members = []
-    if parent_node and parent_node.get("is_leaf") and parent_node.get("size", 0) > 1:
+    if parent_node and parent_node.get("size", 0) > 1:
         for iid in parent_node.get("image_ids", []):
             members.append({
                 "image_id": iid,
@@ -723,6 +724,24 @@ async def handle_atlas_node_labels(request: web.Request) -> web.Response:
             labels[nid] = candidates[0][2]
 
     return web.json_response({"level": int(level), "labels": labels})
+
+
+async def handle_image_full(request: web.Request) -> web.Response:
+    """Serve the original corpus image for full-size viewing."""
+    artifact_dir = request.app["artifact_dir"]
+    image_id = request.match_info["image_id"]
+    conn = db.open_db(artifact_dir)
+    cur = conn.execute("SELECT path FROM images WHERE image_id = ?", (image_id,))
+    row = cur.fetchone()
+    conn.close()
+    if not row:
+        return web.Response(status=404, text="Image not found")
+    image_path = Path(row[0])
+    if not image_path.is_absolute():
+        image_path = Path.cwd() / image_path
+    if not image_path.exists():
+        return web.Response(status=404, text="Image file not found")
+    return web.FileResponse(image_path)
 
 
 async def handle_atlas_tile(request: web.Request) -> web.Response:
@@ -2052,20 +2071,30 @@ function draw() {
     ensureTile(node);
     const tc = tileCache[tileCacheKey(node)];
     if (tc && tc.loaded) {
-      // Contain-fit: show the full image, no cropping.
-      // Cells are shaped to match tile aspect ratios, so gaps are minimal.
       const imgW = tc.img.naturalWidth;
       const imgH = tc.img.naturalHeight;
-      const scale = Math.min(iw / imgW, ih / imgH);
-      const dw = imgW * scale;
-      const dh = imgH * scale;
-      const dx = ix + (iw - dw) / 2;
-      const dy = iy + (ih - dh) / 2;
-      if (dw < iw || dh < ih) {
-        ctx.fillStyle = '#1a1a1a';
-        ctx.fillRect(ix, iy, iw, ih);
+      if (node.door_type === 'member' || node.door_type === 'showcase') {
+        // Individual photo: contain-fit, no cropping
+        const scale = Math.min(iw / imgW, ih / imgH);
+        const dw = imgW * scale;
+        const dh = imgH * scale;
+        const dx = ix + (iw - dw) / 2;
+        const dy = iy + (ih - dh) / 2;
+        if (dw < iw || dh < ih) {
+          ctx.fillStyle = '#1a1a1a';
+          ctx.fillRect(ix, iy, iw, ih);
+        }
+        ctx.drawImage(tc.img, 0, 0, imgW, imgH, dx, dy, dw, dh);
+      } else {
+        // Cover-fit: fill cell completely, center-crop excess.
+        // Montage grids tolerate slight cropping; no black bars.
+        const scale = Math.max(iw / imgW, ih / imgH);
+        const sw = iw / scale;
+        const sh = ih / scale;
+        const sx = (imgW - sw) / 2;
+        const sy = (imgH - sh) / 2;
+        ctx.drawImage(tc.img, sx, sy, sw, sh, ix, iy, iw, ih);
       }
-      ctx.drawImage(tc.img, 0, 0, imgW, imgH, dx, dy, dw, dh);
     } else {
       ctx.fillStyle = '#1a1a1a';
       ctx.fillRect(ix, iy, iw, ih);
@@ -2112,46 +2141,33 @@ function draw() {
       ctx.strokeRect(ix + 1, iy + 1, iw - 2, ih - 2);
     }
 
-    // Door type indicators: colored borders showing navigation direction
-    if (node.door_type === 'back') {
-      // Back door: warm border + upward arrow
+    // Navigation arrow: pill badge with arrow icon
+    if (iw > 30 && ih > 30 && node.door_type && node.door_type !== 'self' && node.door_type !== 'member' && node.door_type !== 'showcase') {
       ctx.save();
-      const bw = Math.max(2, Math.min(4, iw * 0.012));
-      ctx.strokeStyle = 'rgba(220,180,120,0.7)';
-      ctx.lineWidth = bw;
-      ctx.strokeRect(ix + bw/2, iy + bw/2, iw - bw, ih - bw);
-      if (iw > 40 && ih > 40) {
-        const iconSz = Math.max(14, Math.min(24, iw * 0.09));
-        ctx.fillStyle = 'rgba(220,180,120,0.9)';
-        ctx.font = `bold ${iconSz}px system-ui`;
-        ctx.textAlign = 'left';
-        ctx.textBaseline = 'top';
-        ctx.fillText('\u2191', ix + 6, iy + 4);
+      const badgeSz = Math.max(16, Math.min(28, Math.min(iw, ih) * 0.18));
+      const pad = 3;
+      let bx, by, arrow;
+      if (node.door_type === 'back') {
+        bx = ix + pad; by = iy + pad; arrow = '\u2191';
+      } else if (node.door_type === 'down') {
+        bx = ix + iw - badgeSz - pad; by = iy + ih - badgeSz - pad; arrow = '\u2193';
+      } else if (node.door_type === 'lateral') {
+        bx = ix + iw - badgeSz - pad; by = iy + pad; arrow = '\u2192';
       }
-      ctx.restore();
-    } else if (node.door_type === 'down') {
-      // Down door: green border + downward arrow
-      ctx.save();
-      const bw = Math.max(2, Math.min(4, iw * 0.012));
-      ctx.strokeStyle = 'rgba(100,200,120,0.7)';
-      ctx.lineWidth = bw;
-      ctx.strokeRect(ix + bw/2, iy + bw/2, iw - bw, ih - bw);
-      if (iw > 40 && ih > 40) {
-        const iconSz = Math.max(14, Math.min(24, iw * 0.09));
-        ctx.fillStyle = 'rgba(100,200,120,0.9)';
-        ctx.font = `bold ${iconSz}px system-ui`;
-        ctx.textAlign = 'right';
-        ctx.textBaseline = 'bottom';
-        ctx.fillText('\u2193', ix + iw - 6, iy + ih - 4);
+      if (arrow) {
+        // Dark pill background
+        const r = badgeSz * 0.3;
+        ctx.fillStyle = 'rgba(0,0,0,0.55)';
+        ctx.beginPath();
+        ctx.roundRect(bx, by, badgeSz, badgeSz, r);
+        ctx.fill();
+        // White arrow
+        ctx.font = `bold ${badgeSz * 0.65}px system-ui`;
+        ctx.fillStyle = 'rgba(255,255,255,0.9)';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(arrow, bx + badgeSz / 2, by + badgeSz / 2);
       }
-      ctx.restore();
-    } else if (node.door_type === 'lateral') {
-      // Lateral door: blue border
-      ctx.save();
-      const bw = Math.max(2, Math.min(4, iw * 0.012));
-      ctx.strokeStyle = 'rgba(100,160,220,0.6)';
-      ctx.lineWidth = bw;
-      ctx.strokeRect(ix + bw/2, iy + bw/2, iw - bw, ih - bw);
       ctx.restore();
     }
 
@@ -2493,12 +2509,10 @@ async function init() {
       `${meta.corpus_size} images, ${meta.n_neighborhoods} neighborhoods` +
       (manifest && manifest.max_level > 0 ? `, ${manifest.max_level + 1} levels` : '');
 
-    // Push root frame — re-layout with justified rows so tiles match
-    // image aspect ratios instead of using treemap rects
-    const rootTiles = layoutAsGrid(meta.nodes);
+    // Push root frame — nodes already carry treemap rects from atlas build
     viewStack = [{
       level: 0,
-      nodes: rootTiles,
+      nodes: meta.nodes,
       camera: null,
       parentNode: null,
     }];
@@ -2557,8 +2571,74 @@ function hitTest(sx, sy) {
 }
 
 async function enterNode(node) {
-  // Don't re-enter the room we're already in
-  if (node.door_type === 'self' || node.door_type === 'member') return;
+  // Back door: always just pops the view stack
+  if (node.door_type === 'back') {
+    exitToParent();
+    return;
+  }
+
+  // Showcase: clicking the full-size image goes back (exits the showcase view)
+  if (node.door_type === 'showcase') {
+    exitToParent();
+    return;
+  }
+
+  // Member image: fixed layout — back door left strip, image fills the rest
+  if (node.door_type === 'member') {
+    const curFrame = currentFrame();
+    const backNode = curFrame?.parentNode;
+    const backStrip = 0.08; // 8% width for back door strip on left
+    const frameTiles = [];
+    // Showcase image fills space to the right of the back strip
+    frameTiles.push({
+      node_id: node.node_id || node.image_id,
+      image_id: node.image_id,
+      level: node.level,
+      is_leaf: false,
+      size: 1,
+      tile_path: '',
+      thumb_url: `/api/image/${node.image_id}/full`,
+      door_type: 'showcase',
+      tile_w: 1024,
+      tile_h: 1024,
+      rect: [backNode ? backStrip : 0, 0, backNode ? 1 - backStrip : 1, 1],
+    });
+    if (backNode) {
+      frameTiles.push({
+        ...backNode,
+        door_type: 'back',
+        size: 1,
+        rect: [0, 0, backStrip, backStrip],
+      });
+    }
+    viewStack.push({
+      level: curFrame ? curFrame.level : 0,
+      nodes: frameTiles,
+      camera: null,
+      parentNode: backNode || null,
+    });
+    fitOverview();
+    updateBreadcrumb();
+    updateToolbarState();
+    return;
+  }
+
+  // Self tile click: don't re-enter the same node.
+  // Instead, find the largest child (down door) and enter it.
+  if (node.door_type === 'self') {
+    const curFrame = currentFrame();
+    if (curFrame) {
+      const downDoors = curFrame.nodes.filter(n => n.door_type === 'down');
+      if (downDoors.length > 0) {
+        // Enter the largest child
+        const biggest = downDoors.reduce((a, b) => (b.size || 0) > (a.size || 0) ? b : a, downDoors[0]);
+        enterNode(biggest);
+        return;
+      }
+    }
+    // No children — nowhere deeper to go
+    return;
+  }
 
   // Silent calibration: record every node entry
   recordFlythroughVisit(node);
@@ -2580,44 +2660,76 @@ async function enterNode(node) {
   const hasDown = data.doors.some(d => d.door_type === 'down');
   const frameLevel = hasDown ? level + 1 : level;
 
-  // Unified grid layout.
-  // For leaf nodes: show member images (the node's actual content) + doors.
-  // For single-image leaves: show the node tile as a self-tile + doors.
-  // For cluster nodes: show doors only.
-  let frameTiles;
+  // Layout: back door fixed top-left, everything else in remaining space.
+  let backDoor = data.doors.find(d => d.door_type === 'back');
+  const otherDoors = data.doors.filter(d => d.door_type !== 'back');
+
+  // Synthetic back door: when entering from root, server has no from_node
+  // so it returns no back door. Show the place we came from — the largest
+  // node in the previous frame, which is the most prominent visual the
+  // user was looking at before clicking.
+  if (!backDoor && viewStack.length > 0) {
+    const prevFrame = viewStack[viewStack.length - 1];
+    const prevNodes = prevFrame.nodes || [];
+    const biggest = prevNodes.reduce((a, b) =>
+      (b.size || 0) > (a.size || 0) ? b : a, prevNodes[0]);
+    backDoor = {
+      node_id: '__back_to_parent__',
+      door_type: 'back',
+      size: 1,
+      level: biggest ? biggest.level : 0,
+      tile_path: biggest ? biggest.tile_path || '' : '',
+      tile_w: biggest ? biggest.tile_w || 1024 : 1024,
+      tile_h: biggest ? biggest.tile_h || 1024 : 1024,
+    };
+  }
+
+  const totalDoorWeight = otherDoors.reduce((s, d) => s + Math.max(1, d.size || 1), 0);
+  const selfWeight = Math.max(totalDoorWeight * 3, 10);
+
+  // Build content tiles (members or self + other doors)
+  let contentTiles;
   const members = data.members || [];
   if (members.length > 0) {
-    // Multi-image leaf: show each member image as a tile
+    const perMember = Math.max(1, Math.floor(selfWeight / members.length));
     const memberTiles = members.map(m => ({
       node_id: m.image_id,
       image_id: m.image_id,
       level: node.level,
       is_leaf: false,
-      size: 1,
+      size: perMember,
       tile_path: '',
       thumb_url: m.thumb_url,
       door_type: 'member',
       tile_w: 512,
       tile_h: 512,
-      _layout_weight: Math.max(1.5, data.doors.length * 0.3 / members.length),
     }));
-    frameTiles = layoutAsGrid([...memberTiles, ...data.doors]);
-  } else if (node.size === 1) {
+    contentTiles = [...memberTiles, ...otherDoors];
+  } else {
     const selfTile = {
       node_id: node.node_id,
       level: node.level,
-      is_leaf: false,
-      size: node.size || 0,
+      is_leaf: node.is_leaf || false,
+      size: selfWeight,
       tile_path: node.tile_path || '',
       door_type: 'self',
       child_ids: node.child_ids,
       tile_w: node.tile_w,
       tile_h: node.tile_h,
-      _layout_weight: Math.max(2.0, data.doors.length * 0.6),
     };
-    frameTiles = layoutAsGrid([selfTile, ...data.doors]);
-  } else {
-    frameTiles = layoutAsGrid(data.doors);
+    contentTiles = [selfTile, ...otherDoors];
+  }
+
+  // Layout: back door gets a dedicated left strip, content fills the rest
+  const backStrip = backDoor ? 0.08 : 0;
+  let frameTiles = layoutAsTreemap(contentTiles, [backStrip, 0, 1 - backStrip, 1]);
+
+  if (backDoor) {
+    frameTiles.push({
+      ...backDoor,
+      door_type: 'back',
+      rect: [0, 0, backStrip, backStrip],
+    });
   }
 
   viewStack.push({
@@ -2734,6 +2846,104 @@ function layoutAsGrid(doors) {
     y += rh;
   }
   return result;
+}
+
+// ---- Squarified treemap (Bruls-Huizing-van Wijk 2000) ----
+// Ported from sigiltree/atlas.py. Partitions a rect into sub-rects
+// with area proportional to values and aspect ratios close to 1.
+
+function _worstRatio(areas, side) {
+  if (!areas.length || side <= 0) return Infinity;
+  const total = areas.reduce((s, a) => s + a, 0);
+  const stripLen = total / side;
+  if (stripLen <= 0) return Infinity;
+  let worst = 0;
+  for (const a of areas) {
+    const itemSide = a / stripLen;
+    if (itemSide <= 0) return Infinity;
+    const r = Math.max(stripLen / itemSide, itemSide / stripLen);
+    if (r > worst) worst = r;
+  }
+  return worst;
+}
+
+function _squarify(areas, x, y, w, h) {
+  if (areas.length === 0) return [];
+  if (areas.length === 1) return [[x, y, w, h]];
+
+  const horizontal = w >= h;
+  const side = Math.min(w, h);
+
+  let strip = [areas[0]];
+  let remaining = areas.slice(1);
+
+  while (remaining.length) {
+    const candidate = [...strip, remaining[0]];
+    if (_worstRatio(candidate, side) <= _worstRatio(strip, side)) {
+      strip = candidate;
+      remaining = remaining.slice(1);
+    } else {
+      break;
+    }
+  }
+
+  const stripTotal = strip.reduce((s, a) => s + a, 0);
+  const rects = [];
+
+  if (horizontal) {
+    const stripW = h > 0 ? stripTotal / h : 0;
+    let cy = y;
+    for (const a of strip) {
+      const rh = stripW > 0 ? a / stripW : h;
+      rects.push([x, cy, stripW, rh]);
+      cy += rh;
+    }
+    return rects.concat(_squarify(remaining, x + stripW, y, w - stripW, h));
+  } else {
+    const stripH = w > 0 ? stripTotal / w : 0;
+    let cx = x;
+    for (const a of strip) {
+      const rw = stripH > 0 ? a / stripH : w;
+      rects.push([cx, y, rw, stripH]);
+      cx += rw;
+    }
+    return rects.concat(_squarify(remaining, x, y + stripH, w, h - stripH));
+  }
+}
+
+function squarifiedTreemap(values, rect) {
+  if (!values.length) return [];
+  if (values.length === 1) return [rect];
+  const [rx, ry, rw, rh] = rect;
+  const total = values.reduce((s, v) => s + v, 0);
+  if (total <= 0) return values.map(() => [rx, ry, rw / values.length, rh]);
+  const area = rw * rh;
+  const areas = values.map(v => v / total * area);
+  return _squarify(areas, rx, ry, rw, rh);
+}
+
+function layoutAsTreemap(nodes, bounds) {
+  const n = nodes.length;
+  if (n === 0) return [];
+  const weights = nodes.map(d => Math.max(1, d.size || 1));
+  const rects = squarifiedTreemap(weights, bounds || [0, 0, 1, 1]);
+  return nodes.map((d, i) => {
+    const entry = {
+      node_id: d.node_id,
+      rect: rects[i],
+      level: d.level,
+      is_leaf: d.is_leaf || false,
+      size: d.size || 0,
+      tile_path: d.tile_path || '',
+      door_type: d.door_type,
+      child_ids: d.child_ids,
+      tile_w: d.tile_w,
+      tile_h: d.tile_h,
+    };
+    if (d.thumb_url) entry.thumb_url = d.thumb_url;
+    if (d.image_id) entry.image_id = d.image_id;
+    return entry;
+  });
 }
 
 function exitToParent() {

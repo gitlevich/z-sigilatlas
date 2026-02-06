@@ -621,15 +621,19 @@ def build_atlas(
         neighbor_node_ids = [f"n_{ci_to_rank[nci]:03d}" for nci in neighbor_cluster_indices
                             if nci in ci_to_rank]
 
-        # Render tile — size based on node aspect ratio, not world fraction.
-        # When the user zooms into this node it fills the viewport,
-        # so render at a resolution that looks sharp at that zoom.
+        # Render tile matching the treemap cell's aspect ratio so
+        # contain-fit fills the cell with zero black space and zero distortion.
         tile_name = f"neighborhood_{rank:03d}.jpg"
         tile_path = tiles_dir / tile_name
-        # Square tiles: montage images are always 1024x1024 regardless of
-        # treemap rect. The layout engine handles aspect-ratio display.
-        tile_w = 1024
-        tile_h = 1024
+        TILE_LONG = 1024
+        rx, ry, rw, rh = rect
+        cell_aspect = rw / rh if rh > 0 else 1.0
+        if cell_aspect >= 1.0:
+            tile_w = TILE_LONG
+            tile_h = max(64, round(TILE_LONG / cell_aspect))
+        else:
+            tile_h = TILE_LONG
+            tile_w = max(64, round(TILE_LONG * cell_aspect))
         render_neighborhood_tile(
             sorted_member_ids, tile_w, tile_h, artifact_dir, tile_path,
         )
@@ -782,14 +786,19 @@ def _build_level_nodes(
                 if nci in ci_to_seq
             ]
 
-            # Render tile — size based on node aspect ratio, not world fraction.
-            # When the user zooms into this node it fills the viewport,
-            # so render at a resolution that looks sharp at that zoom.
+            # Render tile matching the treemap cell's aspect ratio so
+            # contain-fit fills the cell with zero black space and zero distortion.
             tile_name = f"{node_id}.jpg"
             tile_path = tiles_dir / tile_name
-            # Square tiles: montage images are always 1024x1024.
-            tile_w = 1024
-            tile_h = 1024
+            TILE_LONG = 1024
+            rx, ry, rw, rh = rect
+            cell_aspect = rw / rh if rh > 0 else 1.0
+            if cell_aspect >= 1.0:
+                tile_w = TILE_LONG
+                tile_h = max(64, round(TILE_LONG / cell_aspect))
+            else:
+                tile_h = TILE_LONG
+                tile_w = max(64, round(TILE_LONG * cell_aspect))
             render_neighborhood_tile(
                 sorted_member_ids, tile_w, tile_h, artifact_dir, tile_path,
             )

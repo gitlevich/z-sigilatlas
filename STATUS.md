@@ -4,16 +4,20 @@
 
 ## Session Recovery Context (2026-02-06)
 
-### What just happened
-- **Zero-waste montage tiles**: Rewrote `render_neighborhood_tile()` in atlas.py. Old grid algorithm (CxR with MAX_CELL_RATIO=2.0) wasted 25-57% of canvas as black space. New algorithm uses `_partition_into_rows(n)` which distributes N images across ~sqrt(N) rows with variable items-per-row, producing exactly zero wasted cells for any N. Canvas is 100% filled.
-- **Self-similar grid layout**: Every view at every level is a square grid of square tiles. `layoutAsGrid()` with greedy row partition, aspect clamping [0.75, 1.5]. All tiles 1024x1024. `fitOverview()` forces square bounding box.
-- **Door type indicators enhanced**: Back doors have warm/amber border + ↑ arrow. Down doors have green border + ↓ arrow. Lateral doors have blue border. Visible at all tile sizes.
-- **Tile cache increased**: TILE_CACHE_MAX raised from 30 to 50 (L0 has 35 tiles).
-- **Unified layout**: One code path (`layoutAsGrid`) for ALL views including size===1 nodes.
-- Contain-fit rendering. All 184 tests pass.
-- Running against `artifacts` (250 images, 35 neighborhoods, 4 levels).
-- Atlas rebuilt with zero-waste tiles (4.5s build time).
-- Ready for Fly.io deploy.
+### What just happened — Treemap layout restored at every level
+- **Root cause**: `layoutAsGrid()` (commit a836289) replaced treemap rects with a uniform justified-row grid, destroying the spatial organization by similarity.
+- **Fix**: Ported squarified treemap algorithm (Bruls-Huizing-van Wijk 2000) from `atlas.py` to client-side JS. New `squarifiedTreemap()`, `_squarify()`, `_worstRatio()` + `layoutAsTreemap()` wrapper.
+- **Root init**: Uses `meta.nodes` directly (they carry pre-computed treemap rects from atlas build).
+- **enterNode()**: All sublevel views (down + back + lateral doors, members, self-tiles) now use `layoutAsTreemap()` with `size` as weight. Area proportional to image count, spatial adjacency from Fiedler/similarity ordering.
+- **Cover-fit rendering**: Montage mosaics use `Math.max` scale (fills cell, center-crops excess — invisible on mosaic grids). Individual photos (`door_type === 'member'`) use `Math.min` scale (contain-fit, no cropping).
+- **Simplified door indicators**: Colored borders removed. Small white arrow icons only: up (back), down (enter deeper), right (lateral peer). Uniform visual treatment — all sigils look the same, just their montage + tiny arrow.
+- All 184 tests pass. No Python changes, no atlas rebuild needed.
+- `layoutAsGrid()` kept as dead code.
+
+### Previous: Zero-waste montage tiles (kept)
+- `render_neighborhood_tile()` uses `_partition_into_rows(n)` — zero wasted cells for any N.
+- All tiles 1024x1024 square. Cover-fit handles cell aspect mismatch at draw time.
+- Tile cache TILE_CACHE_MAX = 50, LRU eviction.
 
 ### Previous: Individual image "room" view (DELETED)
 - `layoutImageRoom()` was deleted — it wasted 12% of screen on a door column.
@@ -709,6 +713,44 @@
 - TestFlowGraphProperties (5): complete graph, symmetric reachability, stable ordering, empty zsummaries, single contrast
 - All 184 tests pass (154 existing + 30 new)
 
+### Treemap layout restoration + aspect-ratio tiles + full-size image view (2026-02-06)
+
+**Treemap restored at every level**:
+- Commit `a836289` replaced treemap rects with `layoutAsGrid()`, destroying spatial organization.
+- Fix: ported squarified treemap (Bruls-Huizing-van Wijk 2000) to client-side JS.
+- Root init uses `meta.nodes` directly (pre-computed treemap rects from atlas build).
+- `enterNode()` uses `layoutAsTreemap()` for all sublevel views (down + back + lateral + members).
+- `layoutAsGrid()` kept as dead code.
+
+**Aspect-ratio-matched tiles** (atlas.py):
+- Montage tiles now rendered at the treemap cell's aspect ratio, not square.
+- `TILE_LONG = 1024`, tile_w and tile_h computed from `cell_aspect = rw / rh`.
+- Contain-fit on these tiles fills the cell with zero black bars and zero distortion.
+- Both `build_atlas()` (level 0) and `_build_level_nodes()` (recursive) updated.
+- Atlas rebuilt: 254 nodes, 4 levels, 3.7s.
+
+**Contain-fit for ALL tiles**:
+- `Math.min` scale for both member photos and montage tiles.
+- No cropping, no stretching, no distortion. Exhibition-quality image presentation.
+
+**Simplified door indicators**:
+- Colored borders removed. Small white arrow icons only: up (back), down (deeper), right (lateral).
+- Uniform visual treatment — all sigils look the same, just their montage + tiny arrow.
+
+**Full-size individual image view**:
+- Clicking a member image pushes a "showcase" frame onto the viewStack.
+- Full-resolution original served via `GET /api/image/{image_id}/full` (new endpoint).
+- Showcase tile gets size=8 (89% of space), back door gets size=1 (11%).
+- Treemap layout places the full image left, back door right.
+- `door_type: 'showcase'` — clicking it does nothing; clicking the back door exits.
+- Contain-fit rendering (no distortion, no cropping).
+
+**Files modified**:
+- `sigiltree/viewer_server.py` — JS treemap functions, `layoutAsTreemap()`, `enterNode()` member handling, `handle_image_full()` endpoint, showcase rendering
+- `sigiltree/atlas.py` — tile dimensions based on treemap cell aspect ratio
+
+All 184 tests pass.
+
 ### Leaf node member images fix (2026-02-06)
 - **Problem**: Clicking a multi-image leaf node (e.g., L1_0029 with 3 images) showed only lateral flow-neighbors. The node's own images — visible in its montage cover tile — vanished on entry. User reported: "the pink image looks like a cluster that i enter, yet i can't see any of the images on the 'cover' inside."
 - **Root cause**: `enterNode()` only had a `size === 1` branch for showing self-tiles. Multi-image leaves (size > 1) fell through to the else branch showing only doors. Additionally, `fromLevel` in the client was computed from `curFrame.level` (the frame's display level) instead of `parentNode.level` (the actual node level), causing back doors to fail cross-level lookup.
@@ -721,3 +763,58 @@
   - Member tiles have `door_type: 'member'` — clicking them does nothing (like 'self' tiles)
 - **Result**: Entering L1_0029 now shows its 3 member images (yellow blocks, orange blur, pink wall) as large tiles in the top row, back door with amber border, and 8 lateral doors below. Cover images match inner view.
 - All 184 tests pass.
+
+### Self-dominant layout + cover-fit montages + self-tile clickable (2026-02-06)
+
+**Self-dominant layout** — hierarchy clarity:
+- Current sigil (self tile or member images) takes ~75% of screen area.
+- `selfWeight = max(totalDoorWeight * 3, 10)` — doors are peripheral exits.
+- For leaf nodes with members: each member gets `floor(selfWeight / members.length)` weight.
+- For non-leaf: a single self tile gets `selfWeight`, doors get their natural size.
+- Treemap layout distributes space proportionally — big self, small exits around edges.
+
+**Cover-fit for montage tiles** — zero black space:
+- Non-member, non-showcase tiles use `Math.max` scale + center-crop (cover-fit).
+- Montage grids of many small thumbnails tolerate slight cropping — imperceptible.
+- Individual photos (member/showcase) still use contain-fit (`Math.min` scale) — no cropping.
+- Result: no black bars anywhere on montage tiles.
+
+**Self tile clickable** — sigils are composites, not atoms:
+- Removed `'self'` from `enterNode()` early return guard.
+- Only `'showcase'` is non-clickable (individual full-size image).
+- Clicking the self tile enters it — shows its children/members with the self-dominant layout at the next level.
+- A montage tile is a sigil (composite of images), not a single image — it should always be enterable.
+
+**Files modified**: `sigiltree/viewer_server.py` (JS only)
+All 184 tests pass.
+
+### Back door at every level + visible arrow badges (2026-02-06)
+
+**Back door missing at first level**:
+- When entering a node from root, `from_node` was empty, so the server returned no back door.
+- Fix: client creates a synthetic back door (`node_id: '__back_to_parent__'`) when the server doesn't return one and `viewStack.length > 0`.
+- Clicking any back door now calls `exitToParent()` directly (new early return at top of `enterNode()`), instead of trying to fetch doors for the back node.
+
+**Visible arrow badges**:
+- Replaced tiny 12-18px text arrows with pill-shaped badges (dark rounded-rect background + white arrow).
+- Badge size: `max(16, min(28, min(iw, ih) * 0.18))` — scales with tile size.
+- Back: up-arrow badge in top-left. Down: down-arrow badge in bottom-right. Lateral: right-arrow badge in top-right.
+- Dark background (`rgba(0,0,0,0.55)`) makes arrows readable on any image.
+
+**Files modified**: `sigiltree/viewer_server.py` (JS only)
+All 184 tests pass.
+
+### Non-overlapping back door layout (2026-02-06)
+
+**Problem**: Back door thumbnail was superimposed on top of content (showcase image or member grid), hiding part of the image.
+
+**Fix**: Back door gets its own dedicated left strip instead of overlapping content:
+- `backStrip = 0.08` (8% width) — back door occupies `[0, 0, 0.08, 0.08]` (square in top-left)
+- Content (treemap of members/doors or showcase image) laid out in remaining space `[0.08, 0, 0.92, 1]`
+- `layoutAsTreemap()` now accepts optional `bounds` parameter for non-default bounding rect
+- Showcase view: image fills `[0.08, 0, 0.92, 1]`, back door in its own `[0, 0, 0.08, 0.08]`
+- Member grid: treemap runs in `[0.08, 0, 0.92, 1]`, back door pinned at `[0, 0, 0.08, 0.08]`
+- When no back door exists (e.g., entering from root), content fills full `[0, 0, 1, 1]`
+
+**Files modified**: `sigiltree/viewer_server.py` (JS only)
+All 184 tests pass.
