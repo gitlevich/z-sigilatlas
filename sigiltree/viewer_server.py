@@ -3077,7 +3077,9 @@ canvas.addEventListener('click', (e) => {
 // ---------------------------------------------------------------------------
 
 document.addEventListener('keydown', (e) => {
-  if (e.key === '`' || e.key === 'F3') {
+  if (e.key === 'Escape') {
+    exitToParent();
+  } else if (e.key === '`' || e.key === 'F3') {
     debugMode = !debugMode;
     scheduleFrame();
   }
