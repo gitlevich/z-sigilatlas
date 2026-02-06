@@ -4,6 +4,7 @@ Builds a multiscale atlas pyramid where each non-leaf node contains a child atla
 that partitions the node's rectangle exactly.
 Pipeline per level: fused kNN graph -> Louvain clustering -> Fiedler ordering -> squarified treemap -> tile rendering.
 """
+from __future__ import annotations
 
 import json
 import hashlib
@@ -14,11 +15,29 @@ from collections import Counter
 from dataclasses import dataclass, asdict, field
 from pathlib import Path
 
-import numpy as np
-from PIL import Image
-
 from sigiltree import db
-from sigiltree.embeddings import EmbeddingStore, FAMILIES
+
+# Heavy imports deferred to function scope for lightweight serving
+# numpy, PIL, EmbeddingStore used only during atlas *building*, not loading
+np = None  # lazy
+Image = None  # lazy
+EmbeddingStore = None  # lazy
+FAMILIES = None  # lazy
+
+
+def _ensure_heavy_imports():
+    """Import numpy, PIL, embeddings on first use (atlas building only)."""
+    global np, Image, EmbeddingStore, FAMILIES
+    if np is None:
+        import numpy as _np
+        np = _np
+    if Image is None:
+        from PIL import Image as _Image
+        Image = _Image
+    if EmbeddingStore is None:
+        from sigiltree.embeddings import EmbeddingStore as _ES, FAMILIES as _F
+        EmbeddingStore = _ES
+        FAMILIES = _F
 
 log = logging.getLogger(__name__)
 
@@ -167,6 +186,7 @@ def build_fused_graph(
         adjacency: (N, N) weighted matrix (weight = vote count 2 or 3)
         id_to_idx: mapping from image_id to matrix index
     """
+    _ensure_heavy_imports()
     from sklearn.neighbors import NearestNeighbors
 
     id_to_idx = {iid: i for i, iid in enumerate(image_ids)}
@@ -217,6 +237,7 @@ def build_sublevel_graph(
     Uses a smaller k than the full-corpus graph to capture fine local structure.
     For very small subsets (< 6 images), returns a fully-connected graph.
     """
+    _ensure_heavy_imports()
     n = len(image_ids)
     if k is None:
         k = min(10, n - 1)
@@ -252,6 +273,7 @@ def cluster_neighborhoods(
     Returns:
         List of clusters, each a list of node indices.
     """
+    _ensure_heavy_imports()
     import networkx as nx
 
     G = nx.from_numpy_array(adjacency)
@@ -306,6 +328,7 @@ def compute_ordering(adjacency: np.ndarray) -> np.ndarray:
     Returns:
         Array of shape (N,) with ordering values per node.
     """
+    _ensure_heavy_imports()
     from scipy.sparse import csr_matrix
     from scipy.sparse.linalg import eigsh
 
@@ -416,6 +439,7 @@ def render_neighborhood_tile(
     are never cropped into unrecognizable strips.  Each cell is filled
     using cover-crop. No image is repeated.
     """
+    _ensure_heavy_imports()
     import math
 
     MAX_CELL_RATIO = 2.0  # cells never skinnier than 1:2
@@ -539,6 +563,7 @@ def build_atlas(
 
     Returns stats dict.
     """
+    _ensure_heavy_imports()
     t0 = time.monotonic()
 
     # 1. Load image IDs
@@ -821,6 +846,7 @@ def build_atlas_recursive(
 
     Returns stats dict.
     """
+    _ensure_heavy_imports()
     t0 = time.monotonic()
 
     # Build level 0
@@ -981,6 +1007,7 @@ def verify_determinism(artifact_dir: Path, level: int = 0) -> dict:
       - IoU >= 0.98 for >= 95% of node rectangles
       - Kendall tau >= 0.99 for 1D ordering
     """
+    _ensure_heavy_imports()
     from scipy.stats import kendalltau
 
     old_meta = load_atlas_meta(artifact_dir, level)

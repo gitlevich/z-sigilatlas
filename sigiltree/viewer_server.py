@@ -1425,6 +1425,55 @@ ATLAS_VIEWER_HTML = r"""<!DOCTYPE html>
     white-space: nowrap;
   }
   #ride-progress-bar.active { display: block; }
+  /* Help overlay */
+  #help-overlay {
+    display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+    z-index: 100; background: rgba(0,0,0,0.82);
+    justify-content: center; align-items: center;
+  }
+  #help-overlay.active { display: flex; }
+  #help-content {
+    background: #1e1e1e; border: 1px solid #444; border-radius: 10px;
+    padding: 28px 36px; max-width: 520px; width: 90%;
+    color: #ccc; font-size: 13px; line-height: 1.7;
+    max-height: 90vh; overflow-y: auto;
+  }
+  #help-content h2 {
+    margin: 0 0 6px; color: #eee; font-size: 18px; font-weight: 600;
+  }
+  #help-content .intro {
+    color: #aaa; font-size: 13px; line-height: 1.65; margin-bottom: 18px;
+  }
+  #help-content .intro p { margin: 0 0 10px; }
+  #help-content .intro em { color: #ccc; font-style: normal; }
+  #help-content .section-label {
+    color: #4a8; font-weight: 600; font-size: 12px; text-transform: uppercase;
+    letter-spacing: 0.5px; margin: 14px 0 6px; display: block;
+  }
+  #help-content .section-label:first-of-type { margin-top: 0; }
+  #help-content .key-row {
+    display: flex; align-items: baseline; margin: 3px 0;
+  }
+  #help-content kbd {
+    display: inline-block; min-width: 52px; padding: 1px 7px;
+    background: #2a2a2a; border: 1px solid #444; border-radius: 3px;
+    font-family: system-ui, sans-serif; font-size: 12px; color: #ddd;
+    text-align: center; margin-right: 10px; white-space: nowrap;
+  }
+  #help-content .key-desc { color: #999; font-size: 12px; }
+  #help-content .dismiss {
+    margin-top: 20px; text-align: center; color: #666; font-size: 11px;
+  }
+  /* Help badge */
+  #help-badge {
+    position: fixed; bottom: 12px; left: 12px; z-index: 15;
+    width: 28px; height: 28px; border-radius: 50%;
+    background: #2a2a2a; border: 1px solid #444;
+    color: #888; font-size: 15px; font-weight: 600;
+    display: flex; align-items: center; justify-content: center;
+    cursor: pointer; transition: all 0.15s;
+  }
+  #help-badge:hover { background: #333; color: #ccc; border-color: #4a8; }
   /* Member panel */
   #neighborhood-panel {
     display: none; position: fixed; bottom: 0; left: 0; right: 0;
@@ -1474,6 +1523,28 @@ ATLAS_VIEWER_HTML = r"""<!DOCTYPE html>
   </div>
   <div class="member-grid" id="memberGrid"></div>
 </div>
+
+<div id="help-overlay">
+  <div id="help-content">
+    <h2>Sigil Atlas</h2>
+    <div class="intro">
+      <p>This is a map of a photograph collection. Every image has been placed next to the ones it most resembles &mdash; not by category, but by what it <em>looks and feels like</em>. Similar images cluster into neighborhoods; neighborhoods nest into larger regions. You can zoom in all the way to individual photographs.</p>
+      <p>The atlas is built on three kinds of visual similarity: what things <em>mean</em>, how they're <em>composed</em>, and what their surfaces <em>feel like</em>. Where all three agree, the groupings are strong.</p>
+      <p>You can also <em>calibrate</em> the atlas to your own eye. Take a contrast ride: the system walks you through the collection along one visual axis &mdash; warm to cool, sharp to soft, simple to complex &mdash; and asks which direction you prefer. Your answers build a personal <em>sigil</em> that reshapes how the atlas highlights what matters to you.</p>
+    </div>
+    <span class="section-label">Navigate</span>
+    <div class="key-row"><kbd>Click</kbd><span class="key-desc">Enter a neighborhood</span></div>
+    <div class="key-row"><kbd>Esc</kbd><span class="key-desc">Go back one level</span></div>
+    <div class="key-row"><kbd>H</kbd><span class="key-desc">Return to top</span></div>
+    <div class="key-row"><kbd>W A S D</kbd><span class="key-desc">Pan around the atlas</span></div>
+    <div class="key-row"><kbd>Scroll</kbd><span class="key-desc">Zoom in and out</span></div>
+    <span class="section-label">Discover</span>
+    <div class="key-row"><kbd>R</kbd><span class="key-desc">Start a contrast ride</span></div>
+    <div class="key-row"><kbd>G</kbd><span class="key-desc">Toggle your sigil overlay</span></div>
+    <div class="dismiss">Press any key or click to begin</div>
+  </div>
+</div>
+<div id="help-badge" onclick="toggleHelp()">?</div>
 
 <script>
 const canvas = document.getElementById('atlas-canvas');
@@ -2176,6 +2247,9 @@ function draw() {
   const nodes = currentNodes();
   if (!nodes.length) return;
 
+  // Gap between neighborhoods scales with zoom but stays visible
+  const gap = Math.max(2, Math.min(6, cam.zoom * 0.003));
+
   for (const node of nodes) {
     const [rx, ry, rw, rh] = node.rect;
     const tl = worldToScreen(rx, ry);
@@ -2184,13 +2258,19 @@ function draw() {
 
     if (tl.x + sw < 0 || tl.y + sh < 0 || tl.x > cw || tl.y > ch) continue;
 
+    // Inset by gap to create visible separation between neighborhoods
+    const ix = tl.x + gap;
+    const iy = tl.y + gap;
+    const iw = Math.max(1, sw - gap * 2);
+    const ih = Math.max(1, sh - gap * 2);
+
     ensureTile(node);
     const tc = tileCache[node.node_id];
     if (tc && tc.loaded) {
-      ctx.drawImage(tc.img, tl.x, tl.y, sw, sh);
+      ctx.drawImage(tc.img, ix, iy, iw, ih);
     } else {
       ctx.fillStyle = '#1a1a1a';
-      ctx.fillRect(tl.x, tl.y, sw, sh);
+      ctx.fillRect(ix, iy, iw, ih);
     }
 
     // Sigil overlay: dim non-aligned, brighten aligned
@@ -2206,7 +2286,7 @@ function draw() {
           const dimAlpha = (1.0 - vs) * 0.65;
           if (dimAlpha > 0.01) {
             ctx.fillStyle = `rgba(0,0,0,${dimAlpha.toFixed(3)})`;
-            ctx.fillRect(tl.x, tl.y, sw, sh);
+            ctx.fillRect(ix, iy, iw, ih);
           }
           // Halo: double-stroke amber glow for top-ranked nodes
           if (vs > 0.55) {
@@ -2214,14 +2294,14 @@ function draw() {
             // Inner glow
             const innerAlpha = t * 0.7;
             ctx.strokeStyle = `rgba(255,170,0,${innerAlpha.toFixed(3)})`;
-            ctx.lineWidth = Math.max(2, Math.min(5, sw * 0.012));
-            ctx.strokeRect(tl.x + 1, tl.y + 1, sw - 2, sh - 2);
+            ctx.lineWidth = Math.max(2, Math.min(5, iw * 0.012));
+            ctx.strokeRect(ix + 1, iy + 1, iw - 2, ih - 2);
             // Outer glow (wider, more transparent)
             if (vs > 0.75) {
               const outerAlpha = (vs - 0.75) / 0.25 * 0.35;
               ctx.strokeStyle = `rgba(255,200,50,${outerAlpha.toFixed(3)})`;
-              ctx.lineWidth = Math.max(3, Math.min(8, sw * 0.02));
-              ctx.strokeRect(tl.x - 1, tl.y - 1, sw + 2, sh + 2);
+              ctx.lineWidth = Math.max(3, Math.min(8, iw * 0.02));
+              ctx.strokeRect(ix - 1, iy - 1, iw + 2, ih + 2);
             }
           }
         }
@@ -2234,37 +2314,40 @@ function draw() {
       if (node.node_id === currentRideNodeId) {
         // Current ride node: bright cyan border
         ctx.strokeStyle = 'rgba(100,200,255,0.8)';
-        ctx.lineWidth = Math.max(3, Math.min(6, sw * 0.015));
-        ctx.strokeRect(tl.x + 1, tl.y + 1, sw - 2, sh - 2);
+        ctx.lineWidth = Math.max(3, Math.min(6, iw * 0.015));
+        ctx.strokeRect(ix + 1, iy + 1, iw - 2, ih - 2);
       } else if (!ridePlan.path.includes(node.node_id)) {
         // Node not in ride path: strong dim
         ctx.fillStyle = 'rgba(0,0,0,0.6)';
-        ctx.fillRect(tl.x, tl.y, sw, sh);
+        ctx.fillRect(ix, iy, iw, ih);
       } else {
         // Node in path but not current: light dim
         ctx.fillStyle = 'rgba(0,0,0,0.3)';
-        ctx.fillRect(tl.x, tl.y, sw, sh);
+        ctx.fillRect(ix, iy, iw, ih);
       }
     }
 
-    // Border
+    // Hover highlight: bright border when mouse is over this node
+    const isHovered = hoveredNode && hoveredNode.node_id === node.node_id;
     const hasChildren = node.child_ids && node.child_ids.length > 0;
-    ctx.strokeStyle = hasChildren ? '#555' : '#333';
-    ctx.lineWidth = 0.5;
-    ctx.strokeRect(tl.x, tl.y, sw, sh);
+    if (isHovered) {
+      ctx.strokeStyle = hasChildren ? 'rgba(100,200,255,0.7)' : 'rgba(200,200,200,0.5)';
+      ctx.lineWidth = Math.max(2, Math.min(4, iw * 0.01));
+      ctx.strokeRect(ix, iy, iw, ih);
+    }
 
     // Label: descriptive name + count
-    if (sw > 60 && sh > 24) {
+    if (iw > 60 && ih > 24) {
       const lvl = currentLevel();
       const lvlLabels = nodeLabels[lvl];
       const descLabel = lvlLabels ? lvlLabels[node.node_id] : null;
-      const fontSize = Math.max(9, Math.min(14, sw / 7));
+      const fontSize = Math.max(9, Math.min(14, iw / 7));
       ctx.font = `bold ${fontSize}px system-ui`;
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
-      const cx = tl.x + sw / 2;
-      const cy = tl.y + sh / 2;
-      if (descLabel && sw > 80) {
+      const cx = ix + iw / 2;
+      const cy = iy + ih / 2;
+      if (descLabel && iw > 80) {
         // Draw text with shadow for readability
         ctx.fillStyle = 'rgba(0,0,0,0.6)';
         ctx.fillText(descLabel, cx + 1, cy - fontSize * 0.4 + 1);
@@ -2678,9 +2761,13 @@ canvas.addEventListener('mousedown', (e) => {
 canvas.addEventListener('mousemove', (e) => {
   lastMousePos = { x: e.clientX, y: e.clientY };
 
-  // Update hovered node
+  // Update hovered node and cursor
   const rect = canvas.getBoundingClientRect();
+  const prevHovered = hoveredNode;
   hoveredNode = hitTest(e.clientX - rect.left, e.clientY - rect.top);
+  canvas.style.cursor = hoveredNode ? 'pointer' : 'default';
+  // Redraw on hover change for highlight effect
+  if (hoveredNode !== prevHovered) scheduleFrame();
 
   if (!dragging) return;
   // Direct manipulation: bypass lerp for zero-latency feel
@@ -2809,6 +2896,43 @@ document.addEventListener('keyup', (e) => {
 window.addEventListener('blur', () => {
   keysDown.clear();
 });
+
+// ---------------------------------------------------------------------------
+// Help overlay
+// ---------------------------------------------------------------------------
+
+const helpOverlay = document.getElementById('help-overlay');
+const helpBadge = document.getElementById('help-badge');
+
+function showHelp() {
+  helpOverlay.classList.add('active');
+  helpBadge.style.display = 'none';
+}
+function hideHelp() {
+  helpOverlay.classList.remove('active');
+  helpBadge.style.display = 'flex';
+  sessionStorage.setItem('sigilatlas_help_seen', '1');
+}
+function toggleHelp() {
+  if (helpOverlay.classList.contains('active')) hideHelp();
+  else showHelp();
+}
+
+helpOverlay.addEventListener('click', (e) => {
+  if (e.target === helpOverlay || e.target.closest('#help-content')) hideHelp();
+});
+document.addEventListener('keydown', (e) => {
+  if (helpOverlay.classList.contains('active')) {
+    e.preventDefault();
+    e.stopPropagation();
+    hideHelp();
+    return;
+  }
+}, true);
+
+if (!sessionStorage.getItem('sigilatlas_help_seen')) {
+  showHelp();
+}
 
 // ---------------------------------------------------------------------------
 // Init

@@ -21,6 +21,8 @@ artifacts/
 
 # Source images (large originals)
 images/
+demo_corpus/
+artifacts_full_906/
 
 # OS
 .DS_Store
