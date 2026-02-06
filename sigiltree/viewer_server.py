@@ -2198,7 +2198,7 @@ function draw() {
       } else if (node.door_type === 'down') {
         bx = ix + iw - badgeSz - pad; by = iy + ih - badgeSz - pad; arrow = '\u2193';
       } else if (node.door_type === 'lateral') {
-        bx = ix + iw - badgeSz - pad; by = iy + pad; arrow = '\u2192';
+        bx = ix + (iw - badgeSz) / 2; by = iy + ih - badgeSz - pad; arrow = '\u2194';
       }
       if (arrow) {
         // Dark pill background
@@ -2721,22 +2721,52 @@ async function enterNode(node) {
   const totalDoorWeight = otherDoors.reduce((s, d) => s + Math.max(1, d.size || 1), 0);
   const selfWeight = Math.max(totalDoorWeight * 3, 10);
 
-  // Build content tiles.
-  // Non-leaf nodes: show children (down doors) as primary content so
-  // the clustering hierarchy is visible. Individual member images only
-  // appear when entering a leaf node that has no children.
-  let contentTiles;
+  // Build content tiles with zoned layout.
+  // Non-leaf nodes: children (down doors) fill the large center zone,
+  // lateral doors get thin strips on left/right edges.
+  // Leaf nodes: individual member images fill the center.
   const members = data.members || [];
+  const backStrip = backDoor ? 0.08 : 0;
+  let frameTiles;
+
   if (hasDown) {
-    // Node has children — show sub-neighborhoods, not individual images
-    contentTiles = [...otherDoors];
+    // Zoned layout: down doors center, laterals on left/right edges
+    const downDoors = otherDoors.filter(d => d.door_type === 'down');
+    const lateralDoors = otherDoors.filter(d => d.door_type !== 'down');
+
+    const lateralStrip = lateralDoors.length > 0 ? 0.06 : 0;
+    // Split laterals into left and right halves
+    const halfLat = Math.ceil(lateralDoors.length / 2);
+    const leftLaterals = lateralDoors.slice(0, halfLat);
+    const rightLaterals = lateralDoors.slice(halfLat);
+    const leftStrip = leftLaterals.length > 0 ? lateralStrip : 0;
+    const rightStrip = rightLaterals.length > 0 ? lateralStrip : 0;
+
+    // Center zone for down doors (children)
+    const cx = backStrip + leftStrip;
+    const cw = 1 - backStrip - leftStrip - rightStrip;
+    const centerTiles = layoutAsTreemap(downDoors, [cx, 0, cw, 1]);
+
+    // Left lateral strip — stacked vertically
+    let leftTiles = [];
+    if (leftLaterals.length > 0) {
+      leftTiles = layoutAsTreemap(leftLaterals, [backStrip, 0, leftStrip, 1]);
+    }
+
+    // Right lateral strip — stacked vertically
+    let rightTiles = [];
+    if (rightLaterals.length > 0) {
+      const rx = 1 - rightStrip;
+      rightTiles = layoutAsTreemap(rightLaterals, [rx, 0, rightStrip, 1]);
+    }
+
+    frameTiles = [...centerTiles, ...leftTiles, ...rightTiles];
   } else if (members.length > 0) {
     // Leaf node — show individual member images
     const perMember = Math.max(1, Math.floor(selfWeight / members.length));
     const memberTiles = members.map(m => {
       const tw = m.thumb_w || 512;
       const th = m.thumb_h || 512;
-      // Weight proportional to pixel area — wider images get wider cells
       const aspectWeight = Math.round(perMember * (tw / th));
       return {
         node_id: m.image_id,
@@ -2751,7 +2781,8 @@ async function enterNode(node) {
         tile_h: th,
       };
     });
-    contentTiles = [...memberTiles, ...otherDoors];
+    const allContent = [...memberTiles, ...otherDoors];
+    frameTiles = layoutAsTreemap(allContent, [backStrip, 0, 1 - backStrip, 1]);
   } else {
     const selfTile = {
       node_id: node.node_id,
@@ -2764,12 +2795,9 @@ async function enterNode(node) {
       tile_w: node.tile_w,
       tile_h: node.tile_h,
     };
-    contentTiles = [selfTile, ...otherDoors];
+    const allContent = [selfTile, ...otherDoors];
+    frameTiles = layoutAsTreemap(allContent, [backStrip, 0, 1 - backStrip, 1]);
   }
-
-  // Layout: back door gets a dedicated left strip, content fills the rest
-  const backStrip = backDoor ? 0.08 : 0;
-  let frameTiles = layoutAsTreemap(contentTiles, [backStrip, 0, 1 - backStrip, 1]);
 
   if (backDoor) {
     const snapshotKey = '__snapshot_' + viewStack.length + '__';
