@@ -16,7 +16,7 @@ def create_app(artifact_dir: Path) -> web.Application:
     app["artifact_dir"] = artifact_dir
     app["arcade_sessions"] = {}  # user_id -> ArcadeSession
     app["ride_sessions"] = {}    # user_id -> RideSession
-    app.router.add_get("/", handle_index)
+    app.router.add_get("/", lambda r: web.HTTPFound("/atlas"))
     app.router.add_get("/nn", handle_nn_page)
     app.router.add_get("/contrasts", handle_contrasts_page)
     app.router.add_get("/calibrate", handle_calibrate_page)
