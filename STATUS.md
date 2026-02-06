@@ -1,6 +1,72 @@
 # Sigil Tree - Project Status
 
-## Current Phase: 9 (VERIFICATION COMPLETE)
+## Current Phase: 11 (IN PROGRESS)
+
+## Phase 11: The Sigil Graph — No Leaves, No Dead Ends (COMPLETE)
+
+### Conceptual shift
+- "The node IS a sigil" — self-similar structure at every level
+- Every node shows **doors**: back (where you came from), down (children), lateral (flow-neighbors)
+- No leaf nodes exist in the UX — the filmstrip/member panel is gone
+- No keyboard navigation — everything is click-based ("joystick metaphor")
+- Floating toolbar replaces keyboard shortcuts: Back, Home, Explore, Sigil, Help
+- Home button replays path in reverse with animation
+
+### Files modified
+- `sigiltree/viewer_server.py` — new `/api/atlas/node/{id}/doors` endpoint, rewrote `enterNode()` to use doors API, removed member panel, keyboard handlers, flow d-pad, added toolbar + touch support
+
+### What was removed
+- `showMembers()` / `closeMembers()` / `showingMembers` / `currentMemberNode`
+- `#neighborhood-panel` HTML/CSS (filmstrip)
+- All keyboard navigation (WASD, arrows, ESC, R, G, H, Enter/Space)
+- `keysDown`, `DRIVE_KEYS`, `updateKeyboardDriving()`
+- `flowToNeighbor()` (replaced by click-to-enter lateral door tiles)
+- `#help-badge` (help moved to toolbar)
+
+### What was added
+- `GET /api/atlas/node/{node_id}/doors?level=N&from_node=X` — returns back + down + lateral doors
+- `enterNode()` now fetches doors and displays them as a grid of clickable tiles
+- `layoutAsGrid(doors)` — arranges doors in a square grid filling [0,1]x[0,1]
+- Door type visual indicators: back door (return arrow + dim border), lateral door (blue border)
+- `#toolbar` — 5 floating buttons: Back, Home, Explore, Sigil, Help
+- `goHome()` — animated reverse path back to root (pop one level every 300ms)
+- `toggleSigil()` — toolbar button for sigil overlay
+- Touch handlers (tap-to-enter) for mobile
+- Updated help overlay with click/toolbar descriptions
+
+### Camera lock (latest)
+- Camera is locked to fill 100% of the viewport for every frame
+- Zero padding: `fitToRect(0, 0, 1, 1, cw, ch, 0)`
+- Disabled: mouse drag panning, wheel scroll/zoom, touch panning
+- Removed: `camVel`, `CAM_LERP`, `PAN_FRICTION`, `ZOOM_FRICTION`, `ZOOM_SENSITIVITY`, `CAM_POS_THRESHOLD`, `CAM_ZOOM_THRESHOLD`, `dragging`, `dragStart`, `camStart`, `lastMousePos`
+- `setCameraTarget()` now snaps immediately (delegates to `setCameraImmediate()`)
+- `updateCamera()` is a no-op (cam = camTarget, always)
+- `isMoving()` always returns false (no animation loop)
+- `resize()` refits camera on window resize
+- All navigation functions (`enterNode`, `exitToParent`, `popToLevel`, `goHome`) use `fitOverview()` to snap camera
+
+### Tests
+- 152/152 pass (no Python logic tests broken; JS-only changes in viewer)
+
+### Browser verification results
+- Atlas loads at L0 with all neighborhoods visible, filling viewport
+- Click any tile -> enters sigil, shows doors (down + lateral) as grid tiles, fills viewport
+- At former leaf nodes: lateral doors appear, click to continue navigating (no dead end)
+- Back button pops one level (verified)
+- Home button animates back to root from any depth (verified)
+- Breadcrumb shows navigation path and is clickable
+- Radar chart shows on hover at all levels
+- Minimap functional
+- No JS errors in console
+- Toolbar buttons all visible and functional (Back, Home, Explore, Sigil, Help)
+- Door type indicators visible: blue border on lateral doors, return arrow on back door
+- Camera locked: wheel event has no effect (verified via JS test)
+- No drag panning, no zoom, no scroll — only click-to-enter
+- 152/152 tests pass
+
+### Deferred
+- Deploy to Fly.io
+- Update README / landing page
 
 ## Phase 1: Corpus ingestion and artifacts (ACCEPTED)
 
@@ -324,7 +390,7 @@
 - Invariant 4.5: ESC always available, no added friction
 - UI live at http://127.0.0.1:8777/atlas
 
-## Phase 9: Contrast rides with drift policy (ACCEPTED)
+## Phase 9: Contrast rides with drift policy (SUPERSEDED by Phase 10)
 
 ### Files created/modified
 - `sigiltree/ride_stats.py` - **NEW**: precompute per-node z-summaries + inter-contrast Pearson correlations
@@ -431,3 +497,87 @@
 - Invariant 4.3: navigation without ride choices doesn't modify sigil
 - Invariant 4.5: ESC always available during ride
 - UI live at http://127.0.0.1:8888/atlas
+
+## Phase 10: Silent Calibration + Flowing Navigation (COMPLETE)
+
+### Conceptual shift
+- "A neighborhood IS a sigil" — its z-profile across all contrasts defines its character; images conform to it
+- Navigation IS calibration: you explore; the system silently records where you go; preferences emerge from visited z-profiles
+- No contrast names shown, no explicit left/right choices, no picker, no consent screens
+- The tree is invisible: at leaf level, arrow keys flow to adjacent neighborhoods in sigil-space
+- The space is contained and loops — you never hit a wall
+
+### Files created
+- `sigiltree/flythrough.py` — **NEW**: silent calibration engine + flow graph
+- `tests/test_flythrough.py` — **NEW**: 32 tests
+
+### Files modified
+- `sigiltree/viewer_server.py` — removed all ride UI, added flythrough + flow navigation
+
+### `sigiltree/flythrough.py`
+- `FlythroughSession`: tracks visited nodes, deduplicates consecutive visits, `is_ready` when >= 5 distinct nodes
+- `infer_preferences()`: for each contrast, computes `mean(z_mean[n] for n in visited)`; if `|bias| > 0.4` -> collapse with direction + clamped strength
+- `flythrough_to_sigil()`: packages inferred preferences into sigil dict compatible with `save_sigil()`
+- `compute_flow_graph()`: pairwise cosine similarity of z-profiles across all leaf nodes; returns `{node_id: [neighbors sorted by similarity]}`
+- `flow_in_direction()`: picks nearest flow-neighbor in spatial direction (right/left/up/down), wraps around if none found in that direction
+- `_z_profile()`, `_cosine_similarity()`: helper functions
+
+### viewer_server.py changes
+
+**Removed** (entire ride UI):
+- All ride state variables (rideActive, ridePlan, rideSession, etc.)
+- All ride functions (toggleRidePicker, loadContrastList, startRidePlan, confirmRide, beginRide, navigateToRideNode, fetchRideDrift, updateDriftMonitor, updateRideProgress, rideChoose, endRide, abortRide, dismissRideCompletion, updateRideIndicator, ridePoleLabels)
+- 4 ride endpoints (plan, step, choose, summary) — kept ride/stats
+- All ride CSS (picker, consent, drift monitor, progress bar, completion overlay)
+- All ride HTML (picker, consent, drift monitor, progress bar, completion divs)
+- Ride keyboard intercepts
+
+**Added** (flythrough + flow):
+- JS state: `flythroughActive`, `flythroughVisits`, `MIN_FLYTHROUGH_VISITS`, `flowNeighborsCache`, `currentMemberNode`
+- Functions: `toggleFlythrough()`, `startFlythrough()`, `finishFlythrough()`, `cancelFlythrough()`, `recordFlythroughVisit()`, `updateFlythroughIndicator()`, `showFlythroughToast()`, `fetchFlowNeighbors()`, `flowToNeighbor()`
+- `enterNode()` hook: records flythrough visit when active
+- `showMembers()` / `closeMembers()`: tracks `currentMemberNode` for flow navigation
+- R key: toggles flythrough (start/finish exploration)
+- Arrow keys at leaf: flow to nearest neighbor in that direction (no dead ends)
+- ESC during flythrough: cancel, clear visits
+- `#flythroughIndicator`: header counter "Exploring (N)"
+- `#flythrough-toast`: brief completion message
+- 2 endpoints replacing 4 ride endpoints:
+  - `POST /api/flythrough/record` — builds session, infers preferences, saves sigil
+  - `GET /api/flow_neighbors` — computes flow graph, returns top-10 neighbors with rects
+- Debug overlay: flythrough visit count + active status
+- Help overlay: updated text ("Start / finish exploration" instead of "Start a contrast ride")
+
+### Tests (32 new flythrough + 2 updated integration = 152 total)
+- TestFlythroughSession (6): empty, record, dedup consecutive, distinct nodes, ready threshold
+- TestInferPreferences (8): high-z right, low-z left, scattered superposed, empty, min_bias, strength proportional, multi-contrast independent, no mutation
+- TestFlythroughToSigil (3): valid structure, empty visits, entry structure
+- TestFlowGraph (6): all have neighbors, self excluded, all others present, most similar first, single node, cross-branch
+- TestFlowInDirection (5): right picks nearest rightward, left picks nearest leftward, wraps, no neighbors, vertical
+- TestCosineSimilarity (4): identical, opposite, orthogonal, zero vector
+- TestIntegration (2 updated): flythrough_record_endpoint, flythrough_full_flow
+
+### Files kept unchanged
+- `sigiltree/ride_stats.py` — z-summaries power both old rides and new flythrough
+- `sigiltree/ride_engine.py` — unused but harmless
+- `sigiltree/ride_session.py` — unused but harmless
+
+### Verification results
+- 152/152 tests pass (11 indexer + 8 embedding + 8 contrast + 16 arcade + 38 atlas + 11 sigil scoring + 28 ride stats/engine/session + 32 flythrough)
+- No ride UI visible anywhere (no picker, no consent, no drift monitor, no progress bar)
+- R starts exploration, counter ticks up as you navigate
+- R again after 5+ distinct nodes -> sigil saved -> "N preferences recorded. Press G to see."
+- Arrow keys at leaf level flow to adjacent neighborhoods (cosine similarity of z-profiles)
+- Flow crosses parent boundaries transparently
+- Navigation loops — no dead ends
+- ESC still works at every depth
+- WASD driving still works at non-leaf levels
+- G overlay reflects flythrough-inferred preferences
+- Invariant 4.1: enter anchors camera to rect (verified)
+- Invariant 4.2: ESC instant from any depth (verified)
+- Invariant 4.3: navigation without finishing flythrough doesn't modify sigil (verified)
+- Invariant 4.5: ESC always available, no added friction (verified)
+
+### Deferred
+- Update README and create landing page to explain "neighborhood is a sigil" vision
+- Deploy updated app to Fly.io

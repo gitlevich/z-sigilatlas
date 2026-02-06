@@ -15,7 +15,7 @@ def create_app(artifact_dir: Path) -> web.Application:
     app = web.Application()
     app["artifact_dir"] = artifact_dir
     app["arcade_sessions"] = {}  # user_id -> ArcadeSession
-    app["ride_sessions"] = {}    # user_id -> RideSession
+    app["flythrough_sessions"] = {}  # user_id -> FlythroughSession
     app.router.add_get("/", lambda r: web.HTTPFound("/atlas"))
     app.router.add_get("/nn", handle_nn_page)
     app.router.add_get("/contrasts", handle_contrasts_page)
@@ -37,11 +37,10 @@ def create_app(artifact_dir: Path) -> web.Application:
     app.router.add_get("/api/atlas/node/{node_id}/children", handle_atlas_node_children)
     app.router.add_get("/api/atlas/neighborhood/{node_id}", handle_atlas_neighborhood)
     app.router.add_get("/api/atlas/sigil_scores", handle_atlas_sigil_scores)
-    app.router.add_post("/api/ride/plan", handle_ride_plan)
-    app.router.add_post("/api/ride/step", handle_ride_step)
-    app.router.add_post("/api/ride/choose", handle_ride_choose)
-    app.router.add_get("/api/ride/summary", handle_ride_summary)
-    app.router.add_get("/api/ride/stats", handle_ride_stats)
+    app.router.add_get("/api/ride/stats", handle_ride_stats)  # z-summaries (kept)
+    app.router.add_post("/api/flythrough/record", handle_flythrough_record)
+    app.router.add_get("/api/atlas/flow_neighbors", handle_flow_neighbors)
+    app.router.add_get("/api/atlas/node/{node_id}/doors", handle_atlas_node_doors)
     app.router.add_get("/api/atlas/node_labels", handle_atlas_node_labels)
     app.router.add_get("/atlas_tiles/{path:.*}", handle_atlas_tile)
     app.router.add_static(
@@ -382,159 +381,183 @@ async def handle_atlas_sigil_scores(request: web.Request) -> web.Response:
     })
 
 
-async def handle_ride_plan(request: web.Request) -> web.Response:
-    from sigiltree.arcade import load_sigil
-    from sigiltree.atlas import load_atlas_meta
+async def handle_flythrough_record(request: web.Request) -> web.Response:
+    """Record flythrough visits and compute sigil from navigation."""
+    from sigiltree.arcade import save_sigil
     from sigiltree.ride_stats import load_ride_stats
-    from sigiltree.ride_engine import plan_ride, derive_lock_set
-    from sigiltree.ride_session import RideSession
+    from sigiltree.flythrough import FlythroughSession, flythrough_to_sigil
 
     artifact_dir = request.app["artifact_dir"]
     body = await request.json()
     user_id = body.get("user_id", "default")
-    contrast_id = body.get("contrast_id")
-    level = body.get("level", 0)
+    visits = body.get("visits", [])
 
-    if not contrast_id:
-        return web.json_response({"error": "contrast_id required"}, status=400)
+    if not visits:
+        return web.json_response({"error": "No visits provided"}, status=400)
 
-    # Load contrast library to map contrast_id -> contrast_name
+    # Build session from visits
+    session = FlythroughSession(user_id=user_id)
+    for v in visits:
+        session.record_visit(v.get("node_id", ""), v.get("level", 0))
+
+    if not session.is_ready:
+        return web.json_response({
+            "status": "not_ready",
+            "visited_count": len(session.distinct_nodes),
+            "preferences_count": 0,
+        })
+
+    # Load z-summaries and contrast library
+    stats = load_ride_stats(artifact_dir)
+    if stats is None:
+        return web.json_response({"error": "Stats not precomputed"}, status=404)
+
     lib_path = artifact_dir / "contrasts" / "contrast_library.json"
     if not lib_path.exists():
         return web.json_response({"error": "No contrast library"}, status=404)
     library = json.loads(lib_path.read_text())
 
-    contrast_name = None
-    for c in library.get("contrasts", []):
-        if c["contrast_id"] == contrast_id:
-            contrast_name = c["name"]
-            break
-    if not contrast_name:
-        return web.json_response({"error": f"Unknown contrast_id: {contrast_id}"}, status=404)
+    # Build all_level_nodes from manifest
+    from sigiltree.atlas import load_atlas_manifest
+    manifest = load_atlas_manifest(artifact_dir)
+    all_level_nodes = {}
+    if manifest:
+        for lvl_info in manifest.get("levels", []):
+            lvl = str(lvl_info["level"])
+            meta_path = artifact_dir / "atlas" / f"level{lvl_info['level']}" / "meta.json"
+            if meta_path.exists():
+                meta = json.loads(meta_path.read_text())
+                all_level_nodes[lvl] = [n["node_id"] for n in meta.get("nodes", [])]
 
-    # Load ride stats
+    sigil = flythrough_to_sigil(session, stats["zsummaries"], library, all_level_nodes)
+    save_sigil(sigil, artifact_dir)
+
+    return web.json_response({
+        "status": "ok",
+        "visited_count": len(session.distinct_nodes),
+        "preferences_count": sigil["collapsed_count"],
+    })
+
+
+async def handle_flow_neighbors(request: web.Request) -> web.Response:
+    """Return flow-neighbor ordering for a node."""
+    from sigiltree.ride_stats import load_ride_stats
+    from sigiltree.atlas import load_atlas_meta
+    from sigiltree.flythrough import compute_flow_graph
+
+    artifact_dir = request.app["artifact_dir"]
+    node_id = request.query.get("node_id")
+    level = request.query.get("level", "0")
+
+    if not node_id:
+        return web.json_response({"error": "node_id required"}, status=400)
+
     stats = load_ride_stats(artifact_dir)
     if stats is None:
-        return web.json_response({"error": "Ride stats not precomputed. Run ride-stats first."}, status=404)
+        return web.json_response({"error": "Stats not computed"}, status=404)
 
-    level_key = str(level)
-    zsummaries = stats["zsummaries"].get(level_key, {})
-    correlations = stats["correlations"]
+    level_zs = stats["zsummaries"].get(str(level), {})
 
-    # Load sigil for lock-set
-    sigil = load_sigil(artifact_dir, user_id)
-    lock_set = derive_lock_set(contrast_name, sigil) if sigil else []
-
-    # Load atlas meta for node list
-    meta = load_atlas_meta(artifact_dir, level=level)
+    meta = load_atlas_meta(artifact_dir, level=int(level))
     if meta is None:
         return web.json_response({"error": f"No atlas level {level}"}, status=404)
 
-    plan = plan_ride(contrast_name, contrast_id, lock_set, zsummaries, correlations, meta["nodes"])
+    node_map = {n["node_id"]: n for n in meta["nodes"]}
+    node_ids = list(node_map.keys())
 
-    # Create session
-    session = RideSession(plan, contrast_id)
-    request.app["ride_sessions"][user_id] = session
+    flow = compute_flow_graph(node_ids, level_zs)
+    neighbors = flow.get(node_id, [])
 
-    return web.json_response({
-        "ride_contrast": plan.ride_contrast,
-        "ride_contrast_id": plan.ride_contrast_id,
-        "resolution": plan.resolution,
-        "path": plan.path,
-        "path_length": len(plan.path),
-        "locked": plan.locked,
-        "drift_estimates": plan.drift_estimates,
-        "condition_info": plan.condition_info,
-        "compound_info": plan.compound_info,
-        "reject_reason": plan.reject_reason,
-        "current_node_id": session.current_node_id,
-        "progress": session.progress,
-    })
+    # Return with enough info for the client to construct node objects
+    result = []
+    for nid in neighbors[:10]:  # top 10 most similar
+        n = node_map.get(nid, {})
+        result.append({
+            "node_id": nid,
+            "rect": n.get("rect", [0, 0, 0, 0]),
+            "level": int(level),
+            "is_leaf": n.get("is_leaf", True),
+            "size": n.get("size", 0),
+            "tile_path": n.get("tile_path", ""),
+        })
+
+    return web.json_response({"node_id": node_id, "neighbors": result})
 
 
-async def handle_ride_step(request: web.Request) -> web.Response:
+async def handle_atlas_node_doors(request: web.Request) -> web.Response:
+    """Return all doors for a sigil: back + down + lateral.
+
+    Unified endpoint that combines children (down doors) and flow-neighbors
+    (lateral doors) into a single response. Every sigil always has doors.
+    """
     from sigiltree.ride_stats import load_ride_stats
-    from sigiltree.ride_engine import compute_ride_drift_at_position
+    from sigiltree.atlas import load_atlas_meta
+    from sigiltree.flythrough import compute_flow_graph
 
     artifact_dir = request.app["artifact_dir"]
-    body = await request.json()
-    user_id = body.get("user_id", "default")
-    level = body.get("level", 0)
+    node_id = request.match_info["node_id"]
+    level = int(request.query.get("level", "0"))
+    from_node = request.query.get("from_node", "")
+    from_level = request.query.get("from_level", "")
 
-    session = request.app["ride_sessions"].get(user_id)
-    if session is None:
-        return web.json_response({"error": "No active ride session"}, status=404)
+    doors = []
 
-    if session.is_complete:
-        return web.json_response({"status": "complete", "band": session.build_band()})
+    # Back door: the sigil we came from (may be at a different level)
+    if from_node:
+        back_level = int(from_level) if from_level else level
+        # Search at from_level first, then same level
+        for search_level in ([back_level, level] if back_level != level else [level]):
+            from_meta = load_atlas_meta(artifact_dir, level=search_level)
+            if from_meta:
+                back_node = next(
+                    (n for n in from_meta["nodes"] if n["node_id"] == from_node),
+                    None,
+                )
+                if back_node:
+                    doors.append({**back_node, "door_type": "back"})
+                    break
 
+    # Down doors: children of this node
+    parent_meta = load_atlas_meta(artifact_dir, level=level)
+    if parent_meta:
+        parent_node = next(
+            (n for n in parent_meta["nodes"] if n["node_id"] == node_id), None
+        )
+        if parent_node and parent_node.get("child_ids"):
+            child_level = level + 1
+            child_meta = load_atlas_meta(artifact_dir, level=child_level)
+            if child_meta:
+                children = [
+                    n for n in child_meta["nodes"]
+                    if n.get("parent_id") == node_id
+                ]
+                for child in children:
+                    doors.append({**child, "door_type": "down"})
+
+    # Lateral doors: flow-neighbors at same level
     stats = load_ride_stats(artifact_dir)
-    zsummaries = stats["zsummaries"].get(str(level), {}) if stats else {}
-
-    drift = compute_ride_drift_at_position(
-        session.path, session.position, session.plan.locked, zsummaries,
-    )
+    if stats:
+        level_zs = stats["zsummaries"].get(str(level), {})
+        meta = load_atlas_meta(artifact_dir, level=level)
+        if meta and level_zs:
+            node_map = {n["node_id"]: n for n in meta["nodes"]}
+            node_ids = list(node_map.keys())
+            flow = compute_flow_graph(node_ids, level_zs)
+            neighbors = flow.get(node_id, [])
+            seen = {d["node_id"] for d in doors}  # don't duplicate back door
+            for nid in neighbors[:8]:
+                if nid not in seen:
+                    n = node_map.get(nid, {})
+                    doors.append({
+                        **n,
+                        "door_type": "lateral",
+                    })
 
     return web.json_response({
-        "status": "continue",
-        "current_node_id": session.current_node_id,
-        "position": session.position,
-        "progress": session.progress,
-        "drift": drift,
-        "ride_contrast": session.contrast_name,
+        "doors": doors,
+        "node_id": node_id,
+        "level": level,
     })
-
-
-async def handle_ride_choose(request: web.Request) -> web.Response:
-    from sigiltree.arcade import load_sigil, save_sigil
-    from sigiltree.ride_session import merge_band_into_sigil
-
-    artifact_dir = request.app["artifact_dir"]
-    body = await request.json()
-    user_id = body.get("user_id", "default")
-    direction = body.get("direction")
-
-    if direction not in ("approach", "retreat", "silence"):
-        return web.json_response({"error": "direction must be approach/retreat/silence"}, status=400)
-
-    session = request.app["ride_sessions"].get(user_id)
-    if session is None:
-        return web.json_response({"error": "No active ride session"}, status=404)
-
-    result = session.record_choice(direction)
-
-    if result["status"] == "complete":
-        band = result.get("band")
-        if band:
-            sigil = load_sigil(artifact_dir, user_id)
-            if sigil:
-                updated = merge_band_into_sigil(sigil, band)
-            else:
-                updated = {
-                    "version": "ride_v1",
-                    "contrast_library_version": "",
-                    "user_id": user_id,
-                    "entries": {band["contrast_id"]: band},
-                }
-            # Ensure save_sigil-required fields exist
-            updated.setdefault("collapsed_count", len(updated.get("entries", {})))
-            updated.setdefault("superposed_count", 0)
-            save_sigil(updated, artifact_dir)
-            log.info("Ride complete for user %s, contrast %s: %s", user_id, band["contrast_name"], band["direction"])
-
-    return web.json_response(result)
-
-
-async def handle_ride_summary(request: web.Request) -> web.Response:
-    user_id = request.query.get("user_id", "default")
-
-    session = request.app["ride_sessions"].get(user_id)
-    if session is None:
-        return web.json_response({"error": "No active ride session"}, status=404)
-
-    state = session.get_state()
-    state["band"] = session.build_band()
-    return web.json_response(state)
 
 
 async def handle_ride_stats(request: web.Request) -> web.Response:
@@ -1363,68 +1386,21 @@ ATLAS_VIEWER_HTML = r"""<!DOCTYPE html>
     border: 1px solid rgba(255,170,0,0.3);
   }
   #sigilIndicator.active { display: inline; }
-  #rideIndicator {
+  #flythroughIndicator {
     display: none; margin-left: 8px; padding: 2px 8px; border-radius: 3px;
     font-size: 11px; font-weight: 600;
     background: rgba(100,200,255,0.15); color: #6cf;
     border: 1px solid rgba(100,200,255,0.3);
   }
-  #rideIndicator.active { display: inline; }
-  #ride-picker {
-    display: none; position: fixed; top: 50%; left: 50%;
-    transform: translate(-50%, -50%);
-    background: #1a1a1a; border: 2px solid #6cf; border-radius: 8px;
-    padding: 16px; z-index: 50; max-height: 80vh; overflow-y: auto;
-    min-width: 280px; color: #ddd; font-size: 13px;
-  }
-  #ride-picker.active { display: block; }
-  #ride-picker h3 { margin: 0 0 12px; color: #6cf; font-size: 15px; }
-  #ride-picker .contrast-item {
-    padding: 6px 10px; cursor: pointer; border-radius: 4px; margin: 2px 0;
-  }
-  #ride-picker .contrast-item:hover { background: rgba(100,200,255,0.15); }
-  #ride-picker .contrast-item.collapsed { color: #fa6; }
-  #ride-consent {
-    display: none; position: fixed; top: 50%; left: 50%;
-    transform: translate(-50%, -50%);
-    background: #1a1a1a; border: 2px solid #6cf; border-radius: 8px;
-    padding: 20px; z-index: 50; min-width: 320px; color: #ddd; font-size: 13px;
-  }
-  #ride-consent.active { display: block; }
-  #ride-consent h3 { margin: 0 0 12px; color: #6cf; }
-  #ride-consent .actions { margin-top: 16px; display: flex; gap: 12px; }
-  #ride-consent button {
-    padding: 6px 16px; border-radius: 4px; border: 1px solid #555;
-    background: #333; color: #ddd; cursor: pointer; font-size: 13px;
-  }
-  #ride-consent button.primary { background: #2a5; border-color: #2a5; color: #fff; }
-  #ride-drift-monitor {
-    display: none; position: fixed; top: 60px; right: 12px;
-    background: rgba(20,20,20,0.9); border: 1px solid #444; border-radius: 6px;
-    padding: 10px 14px; z-index: 30; min-width: 200px; font-size: 12px; color: #ccc;
-  }
-  #ride-drift-monitor.active { display: block; }
-  #ride-drift-monitor h4 { margin: 0 0 8px; color: #6cf; font-size: 13px; }
-  .drift-bar { margin: 3px 0; }
-  .drift-bar-label { display: inline-block; width: 100px; overflow: hidden; text-overflow: ellipsis; }
-  .drift-bar-track { display: inline-block; width: 80px; height: 8px; background: #333; border-radius: 3px; vertical-align: middle; margin-left: 4px; }
-  .drift-bar-fill { height: 100%; border-radius: 3px; }
-  #ride-completion {
-    display: none; position: fixed; top: 50%; left: 50%;
-    transform: translate(-50%, -50%);
-    background: #1a1a1a; border: 2px solid #2a5; border-radius: 8px;
-    padding: 20px; z-index: 50; min-width: 300px; color: #ddd; font-size: 13px;
-  }
-  #ride-completion.active { display: block; }
-  #ride-completion h3 { margin: 0 0 12px; color: #2a5; }
-  #ride-progress-bar {
-    display: none; position: fixed; bottom: 12px; left: 50%;
+  #flythroughIndicator.active { display: inline; }
+  #flythrough-toast {
+    display: none; position: fixed; bottom: 60px; left: 50%;
     transform: translateX(-50%);
-    background: rgba(20,20,20,0.85); border: 1px solid #444; border-radius: 4px;
-    padding: 6px 14px; z-index: 30; font-size: 12px; color: #ccc;
-    white-space: nowrap;
+    background: rgba(20,20,20,0.9); border: 1px solid #2a5; border-radius: 6px;
+    padding: 10px 20px; z-index: 50; font-size: 13px; color: #ddd;
+    transition: opacity 0.5s;
   }
-  #ride-progress-bar.active { display: block; }
+  #flythrough-toast.active { display: block; }
   /* Help overlay */
   #help-overlay {
     display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0;
@@ -1464,38 +1440,24 @@ ATLAS_VIEWER_HTML = r"""<!DOCTYPE html>
   #help-content .dismiss {
     margin-top: 20px; text-align: center; color: #666; font-size: 11px;
   }
-  /* Help badge */
-  #help-badge {
-    position: fixed; bottom: 12px; left: 12px; z-index: 15;
-    width: 28px; height: 28px; border-radius: 50%;
-    background: #2a2a2a; border: 1px solid #444;
-    color: #888; font-size: 15px; font-weight: 600;
+  /* Help badge removed — help is now in toolbar */
+  /* Floating toolbar */
+  #toolbar {
+    position: fixed; bottom: 16px; left: 16px; z-index: 15;
+    display: flex; gap: 8px; align-items: center;
+  }
+  #toolbar button {
+    width: 36px; height: 36px; border-radius: 50%;
+    background: rgba(30,30,30,0.85); border: 1px solid #444;
+    color: #aaa; font-size: 16px; cursor: pointer;
     display: flex; align-items: center; justify-content: center;
-    cursor: pointer; transition: all 0.15s;
+    transition: all 0.15s; padding: 0;
   }
-  #help-badge:hover { background: #333; color: #ccc; border-color: #4a8; }
-  /* Member panel */
-  #neighborhood-panel {
-    display: none; position: fixed; bottom: 0; left: 0; right: 0;
-    max-height: 50vh; background: #1a1a1a; border-top: 2px solid #4a8;
-    overflow-y: auto; z-index: 20; padding: 12px;
+  #toolbar button:hover {
+    background: #333; color: #eee; border-color: #4a8;
   }
-  #neighborhood-panel.active { display: block; }
-  #neighborhood-panel .panel-header {
-    display: flex; justify-content: space-between; align-items: center;
-    margin-bottom: 8px;
-  }
-  #neighborhood-panel .panel-title { font-size: 14px; font-weight: 600; }
-  #neighborhood-panel .panel-close {
-    background: #333; border: 1px solid #555; color: #ccc;
-    padding: 4px 12px; border-radius: 3px; cursor: pointer; font-size: 12px;
-  }
-  #neighborhood-panel .member-grid {
-    display: grid; grid-template-columns: repeat(auto-fill, minmax(100px, 1fr));
-    gap: 4px;
-  }
-  #neighborhood-panel .member-grid img {
-    width: 100%; aspect-ratio: 1; object-fit: cover; border-radius: 2px;
+  #toolbar button.active {
+    background: rgba(100,200,255,0.15); border-color: #6cf; color: #6cf;
   }
 </style>
 </head>
@@ -1505,46 +1467,40 @@ ATLAS_VIEWER_HTML = r"""<!DOCTYPE html>
   <span class="stats" id="stats">Loading...</span>
   <span class="breadcrumb" id="breadcrumb"></span>
   <span id="sigilIndicator">SIGIL</span>
-  <span id="rideIndicator">RIDE</span>
+  <span id="flythroughIndicator">Exploring (0)</span>
   <span class="mode" id="modeLabel">L0</span>
 </div>
 <canvas id="atlas-canvas"></canvas>
 <canvas id="minimap" width="120" height="120"></canvas>
 <div id="debug-overlay"></div>
-<div id="ride-picker"><h3>Select Contrast for Ride</h3><div id="ride-picker-list"></div></div>
-<div id="ride-consent"><h3 id="ride-consent-title"></h3><div id="ride-consent-body"></div><div class="actions"><button class="primary" onclick="confirmRide()">Start Ride</button><button onclick="cancelRide()">Cancel</button></div></div>
-<div id="ride-drift-monitor"><h4>Drift Monitor</h4><div id="drift-bars"></div></div>
-<div id="ride-progress-bar"></div>
-<div id="ride-completion"><h3>Ride Complete</h3><div id="ride-completion-body"></div><div class="actions"><button class="primary" onclick="dismissRideCompletion()">OK</button></div></div>
-<div id="neighborhood-panel">
-  <div class="panel-header">
-    <span class="panel-title" id="panelTitle">Neighborhood</span>
-    <button class="panel-close" onclick="exitToParent()">ESC Back</button>
-  </div>
-  <div class="member-grid" id="memberGrid"></div>
+<div id="flythrough-toast"></div>
+<div id="toolbar">
+  <button id="toolbar-back" title="Back" onclick="exitToParent()" style="opacity:0.3">&#x21A9;</button>
+  <button id="toolbar-home" title="Home" onclick="goHome()" style="opacity:0.3">&#x2302;</button>
+  <button id="toolbar-explore" title="Explore" onclick="toggleFlythrough()">&#x25CE;</button>
+  <button id="toolbar-sigil" title="Sigil overlay" onclick="toggleSigil()">&#x2606;</button>
+  <button id="toolbar-help" title="Help" onclick="toggleHelp()">?</button>
 </div>
 
 <div id="help-overlay">
   <div id="help-content">
     <h2>Sigil Atlas</h2>
     <div class="intro">
-      <p>This is a map of a photograph collection. Every image has been placed next to the ones it most resembles &mdash; not by category, but by what it <em>looks and feels like</em>. Similar images cluster into neighborhoods; neighborhoods nest into larger regions. You can zoom in all the way to individual photographs.</p>
-      <p>The atlas is built on three kinds of visual similarity: what things <em>mean</em>, how they're <em>composed</em>, and what their surfaces <em>feel like</em>. Where all three agree, the groupings are strong.</p>
-      <p>You can also <em>calibrate</em> the atlas to your own eye. Take a contrast ride: the system walks you through the collection along one visual axis &mdash; warm to cool, sharp to soft, simple to complex &mdash; and asks which direction you prefer. Your answers build a personal <em>sigil</em> that reshapes how the atlas highlights what matters to you.</p>
+      <p>A labyrinth of photographs. Every image is grouped with the ones it most resembles &mdash; not by category, but by what it <em>looks and feels like</em>.</p>
+      <p>Click any tile to enter it. Inside, you see doors: some lead deeper into detail, some lead sideways to similar neighborhoods. There are no dead ends. The space loops.</p>
+      <p>Navigate toward what attracts you. The system silently learns your preferences and builds a personal <em>sigil</em> that reshapes what the atlas highlights for you.</p>
     </div>
     <span class="section-label">Navigate</span>
-    <div class="key-row"><kbd>Click</kbd><span class="key-desc">Enter a neighborhood</span></div>
-    <div class="key-row"><kbd>Esc</kbd><span class="key-desc">Go back one level</span></div>
-    <div class="key-row"><kbd>H</kbd><span class="key-desc">Return to top</span></div>
-    <div class="key-row"><kbd>W A S D</kbd><span class="key-desc">Pan around the atlas</span></div>
-    <div class="key-row"><kbd>Scroll</kbd><span class="key-desc">Zoom in and out</span></div>
-    <span class="section-label">Discover</span>
-    <div class="key-row"><kbd>R</kbd><span class="key-desc">Start a contrast ride</span></div>
-    <div class="key-row"><kbd>G</kbd><span class="key-desc">Toggle your sigil overlay</span></div>
-    <div class="dismiss">Press any key or click to begin</div>
+    <div class="key-row"><kbd>Click</kbd><span class="key-desc">Enter a sigil (any tile is a door)</span></div>
+    <div class="key-row"><kbd>Drag</kbd><span class="key-desc">Pan around the atlas</span></div>
+    <span class="section-label">Toolbar</span>
+    <div class="key-row"><kbd>&#x21A9;</kbd><span class="key-desc">Back one level</span></div>
+    <div class="key-row"><kbd>&#x2302;</kbd><span class="key-desc">Animated return home</span></div>
+    <div class="key-row"><kbd>&#x25CE;</kbd><span class="key-desc">Start / finish exploration</span></div>
+    <div class="key-row"><kbd>&#x2606;</kbd><span class="key-desc">Toggle your sigil overlay</span></div>
+    <div class="dismiss">Click anywhere to begin</div>
   </div>
 </div>
-<div id="help-badge" onclick="toggleHelp()">?</div>
 
 <script>
 const canvas = document.getElementById('atlas-canvas');
@@ -1556,14 +1512,6 @@ const minimapCtx = minimapCanvas.getContext('2d');
 // Constants
 // ---------------------------------------------------------------------------
 
-const CAM_LERP = 0.15;
-const CAM_POS_THRESHOLD = 0.5;
-const CAM_ZOOM_THRESHOLD = 0.001;
-const DRIVE_SPEED = 8;
-const ZOOM_KEY_FACTOR = 1.02;
-const ZOOM_SENSITIVITY = 0.003;
-const ZOOM_FRICTION = 0.85;
-const PAN_FRICTION = 0.88;
 const PREFETCH_MARGIN = 1.5;
 const PREFETCH_INTERVAL = 10;
 
@@ -1574,9 +1522,7 @@ const PREFETCH_INTERVAL = 10;
 let manifest = null;
 let cam = { x: 0, y: 0, zoom: 1 };
 let camTarget = { x: 0, y: 0, zoom: 1 };
-let camVel = { x: 0, y: 0, z: 0 };
 let debugMode = false;
-let showingMembers = false;
 
 // Level stack: each entry = { level, nodes, camera, parentNode }
 // viewStack[0] is always level 0 root
@@ -1589,10 +1535,6 @@ let tileCache = {};
 let level0Nodes = [];
 
 // Interaction
-let dragging = false;
-let dragStart = { x: 0, y: 0 };
-let camStart = { x: 0, y: 0 };
-let lastMousePos = { x: 0, y: 0 };
 let hoveredNode = null;
 
 // Sigil overlay
@@ -1643,49 +1585,17 @@ async function fetchNodeLabels(level) {
   } catch (e) { /* labels are optional */ }
 }
 
-// Derive human-readable pole labels from contrast name
-function ridePoleLabels(contrastName) {
-  // Bipolar: "sem_X_vs_Y" -> LOW=X, HIGH=Y
-  const vsMatch = contrastName.match(/^sem_(.+)_vs_(.+)$/);
-  if (vsMatch) {
-    return { low: vsMatch[1].replace(/_/g, ' '), high: vsMatch[2].replace(/_/g, ' ') };
-  }
-  // Unipolar semantic: "sem_X" -> LOW="less X", HIGH="more X"
-  const semMatch = contrastName.match(/^sem_(.+)$/);
-  if (semMatch) {
-    const label = semMatch[1].replace(/_/g, ' ');
-    return { low: 'less ' + label, high: 'more ' + label };
-  }
-  // Perceptual: "brightness" -> LOW="less brightness", HIGH="more brightness"
-  if (!contrastName.startsWith('pca_')) {
-    return { low: 'less ' + contrastName, high: 'more ' + contrastName };
-  }
-  // PCA/emergent: no semantic poles available
-  return { low: 'LOW', high: 'HIGH' };
-}
-
-// Ride state
-let rideActive = false;
-let ridePlan = null;         // plan from /api/ride/plan
-let ridePosition = 0;
-let rideDrift = {};          // {contrast_name: current_z_drift}
-let ridePickerActive = false;
-let rideContrastList = [];   // [{contrast_id, name}]
-let ridePendingPlan = null;  // plan awaiting consent
-let rideTolerance = 0.5;
+// Flythrough (silent calibration) state
+let flythroughActive = false;
+let flythroughVisits = [];   // [{node_id, level, timestamp}]
+const MIN_FLYTHROUGH_VISITS = 5;
+let doorsCache = {};  // {cacheKey: doors[]}
 
 // Animation
 let animFrameId = null;
 let frameCount = 0;
 let lastTickTime = 0;
 let fpsCounter = { frames: 0, lastTime: 0, fps: 0 };
-
-// Keyboard driving
-const keysDown = new Set();
-const DRIVE_KEYS = new Set([
-  'w','a','s','d','q','e',
-  'ArrowUp','ArrowDown','ArrowLeft','ArrowRight',
-]);
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -1727,15 +1637,10 @@ function setCameraImmediate(newCam) {
   camTarget.x = newCam.x;
   camTarget.y = newCam.y;
   camTarget.zoom = newCam.zoom;
-  camVel.x = 0;
-  camVel.y = 0;
-  camVel.z = 0;
 }
 
 function setCameraTarget(newCam) {
-  camTarget.x = newCam.x;
-  camTarget.y = newCam.y;
-  camTarget.zoom = newCam.zoom;
+  setCameraImmediate(newCam);
   scheduleFrame();
 }
 
@@ -1763,7 +1668,6 @@ function tick(timestamp) {
 
   lastTickTime = timestamp;
 
-  updateKeyboardDriving();
   updateCamera();
 
   if (frameCount % PREFETCH_INTERVAL === 0) {
@@ -1779,96 +1683,14 @@ function tick(timestamp) {
 }
 
 function isMoving() {
-  if (keysDown.size > 0) return true;
-  if (Math.abs(camVel.x) > 0.1 || Math.abs(camVel.y) > 0.1 || Math.abs(camVel.z) > 0.0001) return true;
-  if (Math.abs(camTarget.x - cam.x) > CAM_POS_THRESHOLD) return true;
-  if (Math.abs(camTarget.y - cam.y) > CAM_POS_THRESHOLD) return true;
-  if (Math.abs(camTarget.zoom / cam.zoom - 1) > CAM_ZOOM_THRESHOLD) return true;
-  return false;
+  return false;  // Camera is always locked; no animation loop needed
 }
 
 function updateCamera() {
-  // Apply velocity to target
-  if (Math.abs(camVel.x) > 0.1) {
-    camTarget.x += camVel.x;
-    camVel.x *= PAN_FRICTION;
-  } else {
-    camVel.x = 0;
-  }
-  if (Math.abs(camVel.y) > 0.1) {
-    camTarget.y += camVel.y;
-    camVel.y *= PAN_FRICTION;
-  } else {
-    camVel.y = 0;
-  }
-  if (Math.abs(camVel.z) > 0.0001) {
-    const oldZoom = camTarget.zoom;
-    camTarget.zoom *= (1 + camVel.z);
-    // Anchor zoom to last mouse position
-    const rect = canvas.getBoundingClientRect();
-    const mx = lastMousePos.x - rect.left;
-    const my = lastMousePos.y - rect.top;
-    camTarget.x = mx - (mx - camTarget.x) * (camTarget.zoom / oldZoom);
-    camTarget.y = my - (my - camTarget.y) * (camTarget.zoom / oldZoom);
-    camVel.z *= ZOOM_FRICTION;
-  } else {
-    camVel.z = 0;
-  }
-
-  // Lerp cam toward camTarget
-  cam.x += (camTarget.x - cam.x) * CAM_LERP;
-  cam.y += (camTarget.y - cam.y) * CAM_LERP;
-  cam.zoom += (camTarget.zoom - cam.zoom) * CAM_LERP;
-
-  // Snap when close enough
-  if (Math.abs(camTarget.x - cam.x) < CAM_POS_THRESHOLD &&
-      Math.abs(camTarget.y - cam.y) < CAM_POS_THRESHOLD &&
-      Math.abs(camTarget.zoom / cam.zoom - 1) < CAM_ZOOM_THRESHOLD) {
-    cam.x = camTarget.x;
-    cam.y = camTarget.y;
-    cam.zoom = camTarget.zoom;
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Keyboard driving
-// ---------------------------------------------------------------------------
-
-function updateKeyboardDriving() {
-  if (keysDown.size === 0) return;
-
-  const speed = DRIVE_SPEED / cam.zoom * cam.zoom;
-  // Speed in screen pixels, independent of zoom: DRIVE_SPEED px/frame
-  const panSpeed = DRIVE_SPEED;
-
-  if (keysDown.has('w') || keysDown.has('ArrowUp')) {
-    camTarget.y += panSpeed;
-  }
-  if (keysDown.has('s') || keysDown.has('ArrowDown')) {
-    camTarget.y -= panSpeed;
-  }
-  if (keysDown.has('a') || keysDown.has('ArrowLeft')) {
-    camTarget.x += panSpeed;
-  }
-  if (keysDown.has('d') || keysDown.has('ArrowRight')) {
-    camTarget.x -= panSpeed;
-  }
-  if (keysDown.has('q')) {
-    const cw = canvas.clientWidth, ch = canvas.clientHeight;
-    const cx = cw / 2, cy = ch / 2;
-    const oldZoom = camTarget.zoom;
-    camTarget.zoom *= ZOOM_KEY_FACTOR;
-    camTarget.x = cx - (cx - camTarget.x) * (camTarget.zoom / oldZoom);
-    camTarget.y = cy - (cy - camTarget.y) * (camTarget.zoom / oldZoom);
-  }
-  if (keysDown.has('e')) {
-    const cw = canvas.clientWidth, ch = canvas.clientHeight;
-    const cx = cw / 2, cy = ch / 2;
-    const oldZoom = camTarget.zoom;
-    camTarget.zoom /= ZOOM_KEY_FACTOR;
-    camTarget.x = cx - (cx - camTarget.x) * (camTarget.zoom / oldZoom);
-    camTarget.y = cy - (cy - camTarget.y) * (camTarget.zoom / oldZoom);
-  }
+  // Camera is locked to target — no lerp, no velocity
+  cam.x = camTarget.x;
+  cam.y = camTarget.y;
+  cam.zoom = camTarget.zoom;
 }
 
 // ---------------------------------------------------------------------------
@@ -1939,282 +1761,102 @@ function updateSigilIndicator() {
 }
 
 // ---------------------------------------------------------------------------
-// Ride: contrast rides with drift policy
+// Flythrough: silent calibration via navigation
 // ---------------------------------------------------------------------------
 
-function toggleRidePicker() {
-  if (rideActive) return;  // can't open picker during a ride
-  ridePickerActive = !ridePickerActive;
-  const el = document.getElementById('ride-picker');
-  if (ridePickerActive) {
-    loadContrastList();
-    el.classList.add('active');
+function toggleFlythrough() {
+  if (!flythroughActive) {
+    startFlythrough();
   } else {
-    el.classList.remove('active');
+    finishFlythrough();
   }
 }
 
-async function loadContrastList() {
-  const r = await fetch('/api/contrasts');
-  if (!r.ok) return;
-  const lib = await r.json();
-  rideContrastList = lib.contrasts || [];
-
-  // Get sigil to know which are collapsed
-  let collapsedNames = [];
-  try {
-    const sr = await fetch('/api/sigil?user_id=default');
-    if (sr.ok) {
-      const sig = await sr.json();
-      collapsedNames = Object.values(sig.entries || {}).map(e => e.contrast_name);
-    }
-  } catch(e) {}
-
-  const listEl = document.getElementById('ride-picker-list');
-  listEl.innerHTML = '';
-  for (const c of rideContrastList) {
-    const div = document.createElement('div');
-    div.className = 'contrast-item' + (collapsedNames.includes(c.name) ? ' collapsed' : '');
-    div.textContent = c.name + (collapsedNames.includes(c.name) ? ' (collapsed)' : '');
-    div.onclick = () => startRidePlan(c.contrast_id, c.name);
-    listEl.appendChild(div);
-  }
+function startFlythrough() {
+  flythroughActive = true;
+  flythroughVisits = [];
+  updateFlythroughIndicator();
+  showFlythroughToast('Exploring. Navigate toward what attracts you.');
 }
 
-async function startRidePlan(contrastId, contrastName) {
-  document.getElementById('ride-picker').classList.remove('active');
-  ridePickerActive = false;
-
-  const lvl = currentLevel();
-  const r = await fetch('/api/ride/plan', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({user_id: 'default', contrast_id: contrastId, level: lvl}),
-  });
-  if (!r.ok) return;
-  const plan = await r.json();
-  ridePendingPlan = plan;
-
-  // Show consent screen based on resolution
-  const titleEl = document.getElementById('ride-consent-title');
-  const bodyEl = document.getElementById('ride-consent-body');
-
-  if (plan.resolution === 'reject') {
-    titleEl.textContent = 'Ride Not Available';
-    bodyEl.innerHTML = `<p>${plan.reject_reason || 'This contrast cannot be isolated as a single-axis ride in this corpus.'}</p><p>The contrast will remain superposed.</p>`;
-    document.getElementById('ride-consent').classList.add('active');
-    document.querySelector('#ride-consent .primary').style.display = 'none';
+async function finishFlythrough() {
+  const distinctCount = new Set(flythroughVisits.map(v => v.node_id)).size;
+  if (distinctCount < MIN_FLYTHROUGH_VISITS) {
+    showFlythroughToast(`Keep exploring (${distinctCount}/${MIN_FLYTHROUGH_VISITS} neighborhoods)`);
     return;
   }
 
-  document.querySelector('#ride-consent .primary').style.display = '';
+  // POST visits to server
+  try {
+    const r = await fetch('/api/flythrough/record', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({user_id: 'default', visits: flythroughVisits}),
+    });
+    if (!r.ok) {
+      showFlythroughToast('Error recording preferences');
+      return;
+    }
+    const data = await r.json();
 
-  const poles = ridePoleLabels(contrastName);
-  const controlsHtml = `<p>Controls: <b>Left</b> = less like this, <b>Right</b> = more like this, <b>Space</b> = skip, <b>ESC</b> = abort</p>`;
+    flythroughActive = false;
+    flythroughVisits = [];
+    updateFlythroughIndicator();
 
-  if (plan.resolution === 'single') {
-    titleEl.textContent = 'Ride: ' + contrastName;
-    bodyEl.innerHTML = `<p>Sweep <b>${contrastName}</b> from <b>${poles.low}</b> to <b>${poles.high}</b> across <b>${plan.path_length}</b> nodes.</p>` +
-      (plan.locked.length ? `<p>Locked contrasts: ${plan.locked.join(', ')}</p>` : '') +
-      controlsHtml;
-  } else if (plan.resolution === 'compound') {
-    titleEl.textContent = 'Compound Ride: ' + contrastName;
-    const ci = plan.compound_info;
-    bodyEl.innerHTML = `<p>Riding <b>${contrastName}</b> also affects <b>${ci.drifting_contrast}</b> ` +
-      `(drift: ${ci.drift_magnitude.toFixed(2)} z-score).</p>` +
-      `<p>This is a <b>two-axis ride</b>. Both contrasts will vary.</p>` +
-      controlsHtml;
-  } else if (plan.resolution === 'condition') {
-    titleEl.textContent = 'Conditioned Ride: ' + contrastName;
-    const ci = plan.condition_info;
-    bodyEl.innerHTML = `<p>Restricted to <b>${ci.restricted_len}</b> of ${ci.original_len} nodes ` +
-      `where <b>${ci.contrast_name}</b> is stable (z-band: ${ci.z_band[0].toFixed(2)} to ${ci.z_band[1].toFixed(2)}).</p>` +
-      controlsHtml;
+    // Invalidate sigil caches so G overlay refreshes
+    sigilScores = {};
+    sigilVisual = {};
+
+    if (data.preferences_count > 0) {
+      showFlythroughToast(`${data.preferences_count} preferences recorded. Tap the star to see them.`);
+    } else {
+      showFlythroughToast('No clear preferences detected. Try exploring more distinctly.');
+    }
+  } catch (e) {
+    showFlythroughToast('Error recording preferences');
   }
-  document.getElementById('ride-consent').classList.add('active');
 }
 
-function confirmRide() {
-  document.getElementById('ride-consent').classList.remove('active');
-  if (!ridePendingPlan || ridePendingPlan.resolution === 'reject') return;
-  beginRide(ridePendingPlan);
+function cancelFlythrough() {
+  flythroughActive = false;
+  flythroughVisits = [];
+  updateFlythroughIndicator();
 }
 
-function cancelRide() {
-  document.getElementById('ride-consent').classList.remove('active');
-  ridePendingPlan = null;
-}
-
-function beginRide(plan) {
-  ridePlan = plan;
-  rideActive = true;
-  ridePosition = 0;
-  rideDrift = {};
-  updateRideIndicator();
-
-  // Show drift monitor if there are locked contrasts
-  if (plan.locked.length > 0) {
-    document.getElementById('ride-drift-monitor').classList.add('active');
-  }
-  document.getElementById('ride-progress-bar').classList.add('active');
-
-  // Navigate camera to first node
-  navigateToRideNode(0);
-  updateRideProgress();
-  fetchRideDrift();
-}
-
-function navigateToRideNode(position) {
-  if (!ridePlan || position >= ridePlan.path.length) return;
-  const nodeId = ridePlan.path[position];
-  const nodes = currentNodes();
-  const node = nodes.find(n => n.node_id === nodeId);
-  if (!node) return;
-
-  const [rx, ry, rw, rh] = node.rect;
-  const cw = canvas.clientWidth, ch = canvas.clientHeight;
-  const zoomFit = Math.min(cw / rw, ch / rh) * 0.7;
-  setCameraTarget({
-    x: -(rx + rw / 2) * zoomFit + cw / 2,
-    y: -(ry + rh / 2) * zoomFit + ch / 2,
-    zoom: zoomFit,
+function recordFlythroughVisit(node) {
+  if (!flythroughActive) return;
+  const lastVisit = flythroughVisits[flythroughVisits.length - 1];
+  if (lastVisit && lastVisit.node_id === node.node_id) return;
+  flythroughVisits.push({
+    node_id: node.node_id,
+    level: node.level !== undefined ? node.level : currentLevel(),
+    timestamp: Date.now(),
   });
+  updateFlythroughIndicator();
 }
 
-async function fetchRideDrift() {
-  if (!rideActive || !ridePlan) return;
-  const r = await fetch('/api/ride/step', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({user_id: 'default', level: currentLevel()}),
-  });
-  if (!r.ok) return;
-  const data = await r.json();
-  rideDrift = data.drift || {};
-  updateDriftMonitor();
-}
-
-function updateDriftMonitor() {
-  const barsEl = document.getElementById('drift-bars');
-  if (!ridePlan || !ridePlan.locked.length) { barsEl.innerHTML = ''; return; }
-
-  let html = '';
-  for (const lc of ridePlan.locked) {
-    const drift = rideDrift[lc] || 0;
-    const pct = Math.min(100, (drift / rideTolerance) * 100);
-    let color = '#2a5';
-    if (pct > 80) color = '#c44';
-    else if (pct > 50) color = '#ca3';
-    html += `<div class="drift-bar">` +
-      `<span class="drift-bar-label">${lc}</span>` +
-      `<span class="drift-bar-track"><span class="drift-bar-fill" style="width:${pct}%;background:${color}"></span></span>` +
-      ` <span>${drift.toFixed(2)}</span></div>`;
-  }
-  barsEl.innerHTML = html;
-}
-
-function updateRideProgress() {
-  const el = document.getElementById('ride-progress-bar');
-  if (!rideActive || !ridePlan) { el.innerHTML = ''; return; }
-  const total = ridePlan.path.length;
-  const p = ridePoleLabels(ridePlan.ride_contrast);
-  const pct = (ridePosition) / (total - 1);
-  const barW = 120;
-  const filled = Math.round(pct * barW);
-  const bar = `<span style="display:inline-block;width:${barW}px;height:6px;background:#333;border-radius:3px;vertical-align:middle;margin:0 6px;position:relative"><span style="display:block;width:${filled}px;height:100%;background:#5af;border-radius:3px"></span></span>`;
-  el.innerHTML = `<span style="opacity:0.5">Left = less like this</span>` +
-    ` &nbsp; <span style="opacity:0.6">${p.low}</span> ${bar} <span style="opacity:0.6">${p.high}</span>` +
-    ` &nbsp; ${ridePosition + 1}/${total}` +
-    ` &nbsp; <span style="opacity:0.5">Right = more like this</span>` +
-    ` &nbsp; <span style="opacity:0.35">Space=skip  ESC=abort</span>`;
-}
-
-async function rideChoose(direction) {
-  if (!rideActive) return;
-  const r = await fetch('/api/ride/choose', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({user_id: 'default', direction: direction}),
-  });
-  if (!r.ok) return;
-  const data = await r.json();
-
-  if (data.status === 'complete') {
-    endRide(data.band);
-  } else {
-    ridePosition = data.progress ? data.progress.position : ridePosition + 1;
-    navigateToRideNode(ridePosition);
-    updateRideProgress();
-    fetchRideDrift();
-  }
-}
-
-function endRide(band) {
-  rideActive = false;
-  ridePlan = null;
-  updateRideIndicator();
-  document.getElementById('ride-drift-monitor').classList.remove('active');
-  document.getElementById('ride-progress-bar').classList.remove('active');
-
-  // Show completion overlay
-  const bodyEl = document.getElementById('ride-completion-body');
-  if (band) {
-    const bp = ridePoleLabels(band.contrast_name);
-    const arrow = band.direction === 'right' ? bp.high : bp.low;
-    bodyEl.innerHTML = `<p>Contrast <b>${band.contrast_name}</b> collapsed toward <b>${arrow}</b></p>` +
-      `<p>Strength: ${band.strength.toFixed(2)} (${band.n_agreements}/${band.n_presentations} agreements)</p>`;
-  } else {
-    bodyEl.innerHTML = '<p>All skipped. Contrast remains superposed.</p>';
-  }
-  document.getElementById('ride-completion').classList.add('active');
-
-  // Invalidate sigil caches so G overlay refreshes
-  sigilScores = {};
-  sigilVisual = {};
-}
-
-function abortRide() {
-  rideActive = false;
-  ridePlan = null;
-  ridePosition = 0;
-  rideDrift = {};
-  updateRideIndicator();
-  document.getElementById('ride-drift-monitor').classList.remove('active');
-  document.getElementById('ride-progress-bar').classList.remove('active');
-  // Snap camera to full atlas overview (no lerp — instant reset)
-  while (viewStack.length > 1) viewStack.pop();
-  const cw = canvas.clientWidth;
-  const ch = canvas.clientHeight;
-  const target = fitToRect(0, 0, 1, 1, cw, ch, 20);
-  cam.x = target.x; cam.y = target.y; cam.zoom = target.zoom;
-  camTarget.x = target.x; camTarget.y = target.y; camTarget.zoom = target.zoom;
-  closeMembers();
-  updateBreadcrumb();
-  scheduleFrame();
-}
-
-function dismissRideCompletion() {
-  document.getElementById('ride-completion').classList.remove('active');
-  // Snap camera to full atlas overview (no lerp — instant reset)
-  while (viewStack.length > 1) viewStack.pop();
-  const cw = canvas.clientWidth;
-  const ch = canvas.clientHeight;
-  const target = fitToRect(0, 0, 1, 1, cw, ch, 20);
-  cam.x = target.x; cam.y = target.y; cam.zoom = target.zoom;
-  camTarget.x = target.x; camTarget.y = target.y; camTarget.zoom = target.zoom;
-  closeMembers();
-  updateBreadcrumb();
-  scheduleFrame();
-}
-
-function updateRideIndicator() {
-  const el = document.getElementById('rideIndicator');
-  if (rideActive) {
-    el.textContent = ridePlan ? 'RIDE: ' + ridePlan.ride_contrast : 'RIDE';
+function updateFlythroughIndicator() {
+  const el = document.getElementById('flythroughIndicator');
+  const btn = document.getElementById('toolbar-explore');
+  if (flythroughActive) {
+    const count = new Set(flythroughVisits.map(v => v.node_id)).size;
+    el.textContent = `Exploring (${count})`;
     el.classList.add('active');
+    if (btn) btn.classList.add('active');
   } else {
     el.classList.remove('active');
+    if (btn) btn.classList.remove('active');
   }
+}
+
+function showFlythroughToast(msg) {
+  const el = document.getElementById('flythrough-toast');
+  el.textContent = msg;
+  el.classList.add('active');
+  clearTimeout(el._timeout);
+  el._timeout = setTimeout(() => {
+    el.classList.remove('active');
+  }, 4000);
 }
 
 // ---------------------------------------------------------------------------
@@ -2261,6 +1903,8 @@ function resize() {
   canvas.width = canvas.clientWidth * devicePixelRatio;
   canvas.height = canvas.clientHeight * devicePixelRatio;
   ctx.setTransform(devicePixelRatio, 0, 0, devicePixelRatio, 0, 0);
+  // Refit camera to fill viewport after resize
+  fitOverview();
   scheduleFrame();
 }
 
@@ -2302,8 +1946,7 @@ function draw() {
 
     // Sigil overlay: dim non-aligned, brighten aligned
     // Uses rank-stretched visual scores for perceptible contrast
-    // Suppressed during ride to avoid conflicting visual layers
-    if (sigilActive && !rideActive) {
+    if (sigilActive) {
       const lvl = currentLevel();
       const vis = sigilVisual[lvl];
       if (vis !== undefined) {
@@ -2335,38 +1978,48 @@ function draw() {
       }
     }
 
-    // Ride overlay: highlight current ride node, dim non-ride nodes
-    if (rideActive && ridePlan) {
-      const currentRideNodeId = ridePlan.path[ridePosition];
-      if (node.node_id === currentRideNodeId) {
-        // Current ride node: bright cyan border
-        ctx.strokeStyle = 'rgba(100,200,255,0.8)';
-        ctx.lineWidth = Math.max(3, Math.min(6, iw * 0.015));
-        ctx.strokeRect(ix + 1, iy + 1, iw - 2, ih - 2);
-      } else if (!ridePlan.path.includes(node.node_id)) {
-        // Node not in ride path: strong dim
-        ctx.fillStyle = 'rgba(0,0,0,0.6)';
-        ctx.fillRect(ix, iy, iw, ih);
-      } else {
-        // Node in path but not current: light dim
-        ctx.fillStyle = 'rgba(0,0,0,0.3)';
-        ctx.fillRect(ix, iy, iw, ih);
+    // Flythrough: subtle highlight on visited nodes
+    if (flythroughActive && flythroughVisits.some(v => v.node_id === node.node_id)) {
+      ctx.strokeStyle = 'rgba(100,200,255,0.4)';
+      ctx.lineWidth = Math.max(1, Math.min(3, iw * 0.008));
+      ctx.strokeRect(ix + 1, iy + 1, iw - 2, ih - 2);
+    }
+
+    // Door type indicators: subtle visual cues
+    if (node.door_type === 'back') {
+      // Back door: dimmed border with return arrow
+      ctx.strokeStyle = 'rgba(180,180,180,0.4)';
+      ctx.lineWidth = Math.max(1, Math.min(3, iw * 0.008));
+      ctx.strokeRect(ix + 1, iy + 1, iw - 2, ih - 2);
+      // Small return arrow in top-left corner
+      if (iw > 40 && ih > 40) {
+        ctx.save();
+        ctx.fillStyle = 'rgba(200,200,200,0.6)';
+        ctx.font = `${Math.max(10, Math.min(16, iw * 0.06))}px system-ui`;
+        ctx.textAlign = 'left';
+        ctx.textBaseline = 'top';
+        ctx.fillText('\\u21A9', ix + 4, iy + 3);
+        ctx.restore();
       }
+    } else if (node.door_type === 'lateral') {
+      // Lateral door: thin blue-ish border
+      ctx.strokeStyle = 'rgba(100,160,220,0.35)';
+      ctx.lineWidth = Math.max(1, Math.min(2, iw * 0.006));
+      ctx.strokeRect(ix + 1, iy + 1, iw - 2, ih - 2);
     }
 
     // Hover highlight: bright border when mouse is over this node
     const isHovered = hoveredNode && hoveredNode.node_id === node.node_id;
-    const hasChildren = node.child_ids && node.child_ids.length > 0;
     if (isHovered) {
-      ctx.strokeStyle = hasChildren ? 'rgba(100,200,255,0.7)' : 'rgba(200,200,200,0.5)';
+      ctx.strokeStyle = 'rgba(100,200,255,0.7)';
       ctx.lineWidth = Math.max(2, Math.min(4, iw * 0.01));
       ctx.strokeRect(ix, iy, iw, ih);
     }
-
-    // Labels removed — radar chart on hover communicates identity
   }
 
-  if (hoveredNode && !dragging) drawRadar(hoveredNode);
+  // Radar: show for hovered node
+  const radarNode = hoveredNode ? hoveredNode : null;
+  if (radarNode) drawRadar(radarNode);
   drawMinimap();
   drawDebug();
 }
@@ -2399,10 +2052,10 @@ function drawRadar(node) {
   const cw = canvas.clientWidth;
   const ch = canvas.clientHeight;
 
-  // Position: top-left corner, offset from edge
-  const centerX = 90;
-  const centerY = 90;
-  const radius = 60;
+  // Position: top-left with breathing room (not crammed in corner, not covering center)
+  const radius = 70;
+  const centerX = radius + 40;
+  const centerY = radius + 50;
   const angleStep = (2 * Math.PI) / n;
   const startAngle = -Math.PI / 2;  // 12 o'clock
 
@@ -2411,7 +2064,7 @@ function drawRadar(node) {
   ctx.globalAlpha = 0.85;
   ctx.fillStyle = '#111';
   ctx.beginPath();
-  ctx.arc(centerX, centerY, radius + 28, 0, 2 * Math.PI);
+  ctx.arc(centerX, centerY, radius + 30, 0, 2 * Math.PI);
   ctx.fill();
   ctx.globalAlpha = 1.0;
 
@@ -2467,18 +2120,18 @@ function drawRadar(node) {
     const y = centerY + Math.sin(angle) * r;
     ctx.fillStyle = 'rgba(100,200,255,0.8)';
     ctx.beginPath();
-    ctx.arc(x, y, 2, 0, 2 * Math.PI);
+    ctx.arc(x, y, 2.5, 0, 2 * Math.PI);
     ctx.fill();
   }
 
   // Axis labels
-  ctx.font = '9px system-ui';
+  ctx.font = '10px system-ui';
   ctx.textBaseline = 'middle';
   ctx.fillStyle = 'rgba(200,200,200,0.7)';
   for (let i = 0; i < n; i++) {
     const angle = startAngle + i * angleStep;
-    const lx = centerX + Math.cos(angle) * (radius + 14);
-    const ly = centerY + Math.sin(angle) * (radius + 14);
+    const lx = centerX + Math.cos(angle) * (radius + 16);
+    const ly = centerY + Math.sin(angle) * (radius + 16);
     // Align text based on position
     if (Math.abs(Math.cos(angle)) < 0.3) ctx.textAlign = 'center';
     else if (Math.cos(angle) > 0) ctx.textAlign = 'left';
@@ -2486,14 +2139,14 @@ function drawRadar(node) {
     ctx.fillText(labels[i], lx, ly);
   }
 
-  // Node label in center
+  // Node label below
   const lvlLabels = nodeLabels[lvl];
   const descLabel = lvlLabels ? lvlLabels[node.node_id] : node.node_id;
-  ctx.font = 'bold 10px system-ui';
+  ctx.font = 'bold 11px system-ui';
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
   ctx.fillStyle = 'rgba(255,255,255,0.5)';
-  ctx.fillText(descLabel || node.node_id, centerX, centerY + radius + 22);
+  ctx.fillText(descLabel || node.node_id, centerX, centerY + radius + 24);
 
   ctx.restore();
 }
@@ -2596,9 +2249,9 @@ function drawDebug() {
   html += `<b>Nodes:</b> ${f.nodes.length}<br>`;
   html += `<b>Camera:</b> x=${cam.x.toFixed(0)} y=${cam.y.toFixed(0)} z=${cam.zoom.toFixed(0)}<br>`;
   html += `<b>Target:</b> x=${camTarget.x.toFixed(0)} y=${camTarget.y.toFixed(0)} z=${camTarget.zoom.toFixed(0)}<br>`;
-  html += `<b>Velocity:</b> x=${camVel.x.toFixed(1)} y=${camVel.y.toFixed(1)} z=${camVel.z.toFixed(4)}<br>`;
+  html += `<b>Camera locked:</b> yes<br>`;
   html += `<b>Center:</b> (${center.x.toFixed(4)}, ${center.y.toFixed(4)})<br>`;
-  html += `<b>Keys:</b> ${keysDown.size > 0 ? [...keysDown].join('+') : 'none'}<br>`;
+  html += `<b>Flythrough:</b> ${flythroughActive ? 'active' : 'off'}<br>`;
 
   if (f.parentNode) {
     const pn = f.parentNode;
@@ -2636,19 +2289,12 @@ function drawDebug() {
     html += `<br><b>Sigil:</b> active (hover node for detail)<br>`;
   }
 
-  // Ride debug info
-  if (rideActive && ridePlan) {
-    html += `<br><b>--- Ride ---</b><br>`;
-    html += `<b>Contrast:</b> ${ridePlan.ride_contrast}<br>`;
-    html += `<b>Resolution:</b> ${ridePlan.resolution}<br>`;
-    html += `<b>Position:</b> ${ridePosition + 1} / ${ridePlan.path.length}<br>`;
-    html += `<b>Current node:</b> ${ridePlan.path[ridePosition] || 'done'}<br>`;
-    if (Object.keys(rideDrift).length > 0) {
-      html += `<b>Drift:</b><br>`;
-      for (const [lc, d] of Object.entries(rideDrift)) {
-        html += `  ${lc}: ${d.toFixed(3)}<br>`;
-      }
-    }
+  // Flythrough debug info
+  if (flythroughActive) {
+    const distinctCount = new Set(flythroughVisits.map(v => v.node_id)).size;
+    html += `<br><b>--- Flythrough ---</b><br>`;
+    html += `<b>Visits:</b> ${flythroughVisits.length} (${distinctCount} distinct)<br>`;
+    html += `<b>Ready:</b> ${distinctCount >= MIN_FLYTHROUGH_VISITS ? 'yes' : 'no'}<br>`;
   }
 
   el.innerHTML = html;
@@ -2674,8 +2320,7 @@ function updateBreadcrumb() {
   el.innerHTML = parts.join(' > ');
 
   const lvl = currentLevel();
-  document.getElementById('modeLabel').textContent =
-    showingMembers ? 'MEMBERS' : `L${lvl}`;
+  document.getElementById('modeLabel').textContent = `L${lvl}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -2722,8 +2367,7 @@ async function init() {
 function fitOverview() {
   const cw = canvas.clientWidth;
   const ch = canvas.clientHeight;
-  const padding = 20;
-  setCameraImmediate(fitToRect(0, 0, 1, 1, cw, ch, padding));
+  setCameraImmediate(fitToRect(0, 0, 1, 1, cw, ch, 0));
 }
 
 function hitTest(sx, sy) {
@@ -2745,285 +2389,174 @@ function hitTest(sx, sy) {
 }
 
 async function enterNode(node) {
-  if (node.is_leaf || !node.child_ids || node.child_ids.length === 0) {
-    showMembers(node);
-    return;
-  }
+  // Silent calibration: record every node entry
+  recordFlythroughVisit(node);
 
-  // Save current camera
   const curFrame = currentFrame();
-  if (curFrame) {
-    curFrame.camera = { x: cam.x, y: cam.y, zoom: cam.zoom };
-  }
 
-  // Fetch children
-  const r = await fetch(`/api/atlas/node/${node.node_id}/children?level=${node.level}`);
+  // Fetch doors: back + down (children) + lateral (flow-neighbors)
+  const level = node.level !== undefined ? node.level : currentLevel();
+  const fromNode = curFrame?.parentNode?.node_id || '';
+  const fromLevel = curFrame ? curFrame.level : level;
+  const r = await fetch(`/api/atlas/node/${node.node_id}/doors?level=${level}&from_node=${fromNode}&from_level=${fromLevel}`);
   const data = await r.json();
 
-  if (data.is_leaf || !data.children || data.children.length === 0) {
-    showMembers(node);
-    return;
-  }
+  if (!data.doors || !data.doors.length) return;
 
-  // Push new frame
+  // Determine the primary level for the new frame:
+  // If there are "down" doors, the frame level is level+1
+  // Otherwise (lateral only), stay at same level
+  const hasDown = data.doors.some(d => d.door_type === 'down');
+  const frameLevel = hasDown ? level + 1 : level;
+
+  // Layout doors as a grid of tiles
+  const doorTiles = layoutAsGrid(data.doors);
+
   viewStack.push({
-    level: node.level + 1,
-    nodes: data.children,
+    level: frameLevel,
+    nodes: doorTiles,
     camera: null,
     parentNode: node,
   });
 
-  // Animated zoom into parent rect
-  const [rx, ry, rw, rh] = node.rect;
-  const cw = canvas.clientWidth;
-  const ch = canvas.clientHeight;
-  setCameraTarget(fitToRect(rx, ry, rw, rh, cw, ch, 20));
+  // Snap camera to fit the door grid (always [0,0,1,1])
+  fitOverview();
 
-  closeMembers();
   updateBreadcrumb();
+  updateToolbarState();
 
-  // Fetch sigil scores and node labels for new level
+  // Fetch metadata for the new level
   if (sigilActive) {
-    fetchSigilScores(node.level + 1);
+    fetchSigilScores(frameLevel);
   }
-  fetchNodeLabels(node.level + 1);
-  fetchZsummaries(node.level + 1);
+  fetchNodeLabels(frameLevel);
+  fetchZsummaries(frameLevel);
+}
+
+function layoutAsGrid(doors) {
+  const n = doors.length;
+  if (n === 0) return [];
+  const cols = Math.ceil(Math.sqrt(n));
+  const rows = Math.ceil(n / cols);
+  return doors.map((d, i) => ({
+    node_id: d.node_id,
+    rect: [(i % cols) / cols, Math.floor(i / cols) / rows, 1 / cols, 1 / rows],
+    level: d.level,
+    is_leaf: false,
+    size: d.size || 0,
+    tile_path: d.tile_path || '',
+    door_type: d.door_type,
+    child_ids: d.child_ids,
+  }));
 }
 
 function exitToParent() {
-  if (showingMembers) {
-    closeMembers();
-    scheduleFrame();
-    return;
-  }
-
   if (viewStack.length <= 1) {
     fitOverview();
     updateBreadcrumb();
-    scheduleFrame();
+    updateToolbarState();
     return;
   }
 
-  // Pop current frame
   viewStack.pop();
-
-  // Animated restore from parent frame
-  const parentFrame = currentFrame();
-  if (parentFrame && parentFrame.camera) {
-    setCameraTarget({ ...parentFrame.camera });
-  } else {
-    const cw = canvas.clientWidth;
-    const ch = canvas.clientHeight;
-    setCameraTarget(fitToRect(0, 0, 1, 1, cw, ch, 20));
-  }
-
-  closeMembers();
+  fitOverview();
   updateBreadcrumb();
+  updateToolbarState();
 }
 
 function popToLevel(stackIndex) {
   while (viewStack.length > stackIndex + 1) {
     viewStack.pop();
   }
-  const frame = currentFrame();
-  if (frame && frame.camera) {
-    setCameraTarget({ ...frame.camera });
-  } else {
-    const cw = canvas.clientWidth;
-    const ch = canvas.clientHeight;
-    setCameraTarget(fitToRect(0, 0, 1, 1, cw, ch, 20));
-  }
-  closeMembers();
+  fitOverview();
   updateBreadcrumb();
+  updateToolbarState();
 }
 
 // ---------------------------------------------------------------------------
-// Member panel
+// Toolbar actions
 // ---------------------------------------------------------------------------
 
-async function showMembers(node) {
-  showingMembers = true;
-  updateBreadcrumb();
-
-  // Animated zoom to node rect
-  const [rx, ry, rw, rh] = node.rect;
-  const cw = canvas.clientWidth;
-  const ch = canvas.clientHeight;
-  const panelH = Math.min(ch * 0.5, 300);
-  const viewH = ch - panelH;
-  setCameraTarget(fitToRect(rx, ry, rw, rh, cw, viewH, 30));
-
-  const level = node.level !== undefined ? node.level : currentLevel();
-  const r = await fetch(`/api/atlas/neighborhood/${node.node_id}?level=${level}`);
-  const data = await r.json();
-  document.getElementById('panelTitle').textContent =
-    `${node.node_id} - ${data.size} images`;
-  const grid = document.getElementById('memberGrid');
-  grid.innerHTML = '';
-  for (const m of data.members) {
-    const img = document.createElement('img');
-    img.src = m.thumb_url;
-    img.alt = m.filename;
-    img.loading = 'lazy';
-    img.title = m.filename;
-    grid.appendChild(img);
+function updateToolbarState() {
+  const backBtn = document.getElementById('toolbar-back');
+  const homeBtn = document.getElementById('toolbar-home');
+  if (backBtn) {
+    backBtn.style.opacity = viewStack.length > 1 ? '1' : '0.3';
   }
-  document.getElementById('neighborhood-panel').classList.add('active');
+  if (homeBtn) {
+    homeBtn.style.opacity = viewStack.length > 1 ? '1' : '0.3';
+  }
 }
 
-function closeMembers() {
-  showingMembers = false;
-  document.getElementById('neighborhood-panel').classList.remove('active');
-  updateBreadcrumb();
+async function goHome() {
+  if (viewStack.length <= 1) return;
+
+  // Animated reverse: pop one level at a time with brief delay
+  const popStep = () => {
+    if (viewStack.length <= 1) {
+      fitOverview();
+      updateBreadcrumb();
+      updateToolbarState();
+      return;
+    }
+    viewStack.pop();
+    fitOverview();
+    updateBreadcrumb();
+    updateToolbarState();
+    if (viewStack.length > 1) {
+      setTimeout(popStep, 300);
+    }
+  };
+  popStep();
 }
 
 // ---------------------------------------------------------------------------
 // Mouse interaction
 // ---------------------------------------------------------------------------
 
-canvas.addEventListener('mousedown', (e) => {
-  dragging = true;
-  dragStart = { x: e.clientX, y: e.clientY };
-  camStart = { x: cam.x, y: cam.y };
-});
-
 canvas.addEventListener('mousemove', (e) => {
-  lastMousePos = { x: e.clientX, y: e.clientY };
-
   // Update hovered node and cursor
   const rect = canvas.getBoundingClientRect();
   const prevHovered = hoveredNode;
   hoveredNode = hitTest(e.clientX - rect.left, e.clientY - rect.top);
   canvas.style.cursor = hoveredNode ? 'pointer' : 'default';
-  // Redraw on hover change for highlight effect
   if (hoveredNode !== prevHovered) scheduleFrame();
-
-  if (!dragging) return;
-  // Direct manipulation: bypass lerp for zero-latency feel
-  const dx = e.clientX - dragStart.x;
-  const dy = e.clientY - dragStart.y;
-  cam.x = camStart.x + dx;
-  cam.y = camStart.y + dy;
-  camTarget.x = cam.x;
-  camTarget.y = cam.y;
-  camVel.x = 0;
-  camVel.y = 0;
-  scheduleFrame();
 });
 
-canvas.addEventListener('mouseup', (e) => {
-  const dx = Math.abs(e.clientX - dragStart.x);
-  const dy = Math.abs(e.clientY - dragStart.y);
-  dragging = false;
-  if (dx < 5 && dy < 5) {
-    const rect = canvas.getBoundingClientRect();
-    const sx = e.clientX - rect.left;
-    const sy = e.clientY - rect.top;
-    const node = hitTest(sx, sy);
-    if (node) {
-      enterNode(node);
-    }
-  }
-});
-
-canvas.addEventListener('wheel', (e) => {
-  e.preventDefault();
+canvas.addEventListener('click', (e) => {
   const rect = canvas.getBoundingClientRect();
-  lastMousePos = { x: e.clientX, y: e.clientY };
-
-  if (e.ctrlKey || Math.abs(e.deltaX) < Math.abs(e.deltaY) * 0.3) {
-    // Zoom: velocity-based
-    camVel.z -= e.deltaY * ZOOM_SENSITIVITY;
+  const sx = e.clientX - rect.left;
+  const sy = e.clientY - rect.top;
+  const node = hitTest(sx, sy);
+  if (node) {
+    enterNode(node);
   }
-  if (!e.ctrlKey) {
-    // Pan: velocity-based
-    camVel.x -= e.deltaX * 0.5;
-    camVel.y -= e.deltaY * 0.5;
-  }
-  scheduleFrame();
-}, { passive: false });
+});
 
 // ---------------------------------------------------------------------------
-// Keyboard
+// Keyboard: minimal — only debug toggle
 // ---------------------------------------------------------------------------
 
 document.addEventListener('keydown', (e) => {
-  // Ride mode intercepts all drive/action keys
-  if (rideActive && !ridePickerActive) {
-    if (e.key === 'd' || e.key === 'D' || e.key === 'ArrowRight') {
-      e.preventDefault(); rideChoose('approach'); return;
-    } else if (e.key === 'a' || e.key === 'A' || e.key === 'ArrowLeft') {
-      e.preventDefault(); rideChoose('retreat'); return;
-    } else if (e.key === ' ') {
-      e.preventDefault(); rideChoose('silence'); return;
-    } else if (e.key === 'Escape') {
-      e.preventDefault(); abortRide(); return;
-    }
-  }
-
-  // ESC closes ride picker/consent/completion
-  if (e.key === 'Escape') {
-    if (ridePickerActive) {
-      document.getElementById('ride-picker').classList.remove('active');
-      ridePickerActive = false;
-      e.preventDefault(); return;
-    }
-    if (document.getElementById('ride-consent').classList.contains('active')) {
-      cancelRide(); e.preventDefault(); return;
-    }
-    if (document.getElementById('ride-completion').classList.contains('active')) {
-      dismissRideCompletion(); e.preventDefault(); return;
-    }
-  }
-
-  // Drive keys (disabled during ride)
-  if (DRIVE_KEYS.has(e.key) && !rideActive) {
-    e.preventDefault();
-    keysDown.add(e.key);
-    scheduleFrame();
-    return;
-  }
-
-  if (e.key === 'Escape') {
-    exitToParent();
-  } else if (e.key === 'Home' || e.key === 'h' || e.key === 'H') {
-    while (viewStack.length > 1) viewStack.pop();
-    const cw = canvas.clientWidth;
-    const ch = canvas.clientHeight;
-    setCameraTarget(fitToRect(0, 0, 1, 1, cw, ch, 20));
-    closeMembers();
-    updateBreadcrumb();
-  } else if (e.key === '`' || e.key === 'F3') {
+  if (e.key === '`' || e.key === 'F3') {
     debugMode = !debugMode;
     scheduleFrame();
-  } else if (e.key === 'Enter' || e.key === ' ') {
-    e.preventDefault();
-    if (hoveredNode) {
-      enterNode(hoveredNode);
-    }
-  } else if (e.key === 'g' || e.key === 'G') {
-    sigilActive = !sigilActive;
-    if (sigilActive) {
-      fetchSigilScores(currentLevel());
-    }
-    updateSigilIndicator();
-    scheduleFrame();
-  } else if (e.key === 'r' || e.key === 'R') {
-    if (rideActive) {
-      abortRide();
-    } else {
-      toggleRidePicker();
-    }
   }
 });
 
-document.addEventListener('keyup', (e) => {
-  keysDown.delete(e.key);
-});
+// ---------------------------------------------------------------------------
+// Touch support
+// ---------------------------------------------------------------------------
 
-// Blur: release all keys (e.g., alt-tab)
-window.addEventListener('blur', () => {
-  keysDown.clear();
+canvas.addEventListener('touchend', (e) => {
+  if (e.changedTouches.length === 1) {
+    const t = e.changedTouches[0];
+    const rect = canvas.getBoundingClientRect();
+    const sx = t.clientX - rect.left;
+    const sy = t.clientY - rect.top;
+    const node = hitTest(sx, sy);
+    if (node) enterNode(node);
+  }
 });
 
 // ---------------------------------------------------------------------------
@@ -3031,15 +2564,12 @@ window.addEventListener('blur', () => {
 // ---------------------------------------------------------------------------
 
 const helpOverlay = document.getElementById('help-overlay');
-const helpBadge = document.getElementById('help-badge');
 
 function showHelp() {
   helpOverlay.classList.add('active');
-  helpBadge.style.display = 'none';
 }
 function hideHelp() {
   helpOverlay.classList.remove('active');
-  helpBadge.style.display = 'flex';
   sessionStorage.setItem('sigilatlas_help_seen', '1');
 }
 function toggleHelp() {
@@ -3047,17 +2577,20 @@ function toggleHelp() {
   else showHelp();
 }
 
+function toggleSigil() {
+  sigilActive = !sigilActive;
+  if (sigilActive) {
+    fetchSigilScores(currentLevel());
+  }
+  updateSigilIndicator();
+  const btn = document.getElementById('toolbar-sigil');
+  if (btn) btn.classList.toggle('active', sigilActive);
+  scheduleFrame();
+}
+
 helpOverlay.addEventListener('click', (e) => {
   if (e.target === helpOverlay || e.target.closest('#help-content')) hideHelp();
 });
-document.addEventListener('keydown', (e) => {
-  if (helpOverlay.classList.contains('active')) {
-    e.preventDefault();
-    e.stopPropagation();
-    hideHelp();
-    return;
-  }
-}, true);
 
 if (!sessionStorage.getItem('sigilatlas_help_seen')) {
   showHelp();
