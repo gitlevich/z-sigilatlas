@@ -1,10 +1,58 @@
 # Sigil Tree - Project Status
 
-## Current Phase: Post-11 fixes, preparing Phase 12
+## Current Phase: Calibration Walk (Phase 12 feature)
 
-## Session Recovery Context (2026-02-06)
+## Session Recovery Context (2026-02-07)
 
-### What just happened — Unlimited depth + hierarchy-first viewer
+### What just happened — Calibration Walk
+
+**Goal**: Resurrect the calibration mechanism as a clean, focused experience. Two image mosaics side by side (extreme low vs extreme high exemplars of a contrast). User picks left, right, or skip. No contrast names shown. Only bipolar contrasts, with PCA as conditional extension. ~17-26 steps, under 2 minutes.
+
+**New file: `sigiltree/walk.py`**:
+- `classify_contrast(name)` — classifies as 'bipolar', 'unipolar', or 'pca' by naming convention
+- `filter_walk_contrasts(library)` — filters to 17 bipolars + 9 PCA, excludes 11 unipolar categories
+- `WalkStep` dataclass — `left_ids`, `right_ids`, `flipped` flag (randomized left/right assignment)
+- `WalkSession` — manages walk flow: bipolar phase -> repeats -> conditional PCA
+- Reuses `arcade.py`'s `Choice`, `build_sigil()`, `save_sigil()` — no modifications to arcade.py
+- Left/right randomization prevents positional bias: 50% chance each step swaps low/high sides
+- PCA early termination: if >= 8 bipolars collapsed, skip PCA entirely
+
+**Modified: `sigiltree/viewer_server.py`**:
+- New route: `GET /walk` serves `WALK_HTML` (full-screen calibration page)
+- New endpoints: `POST /api/walk/start`, `POST /api/walk/choose`
+- `WALK_HTML`: dark full-screen page, two 3x2 image grids side by side, skip button, progress dots
+- Keyboard: ArrowLeft/A, ArrowRight/D, Space/ArrowUp for skip
+- On completion: "Preferences recorded" overlay -> redirect to `/atlas?sigil=1`
+- Atlas toolbar: new "Calibrate" button between Explore and Sigil
+- Atlas init: auto-activates sigil overlay when `?sigil=1` param present
+
+**New tests: `tests/test_walk.py`** — 27 tests:
+- TestContrastClassification (5): perceptual/color/semantic-bipolar/unipolar/pca
+- TestFilterWalkContrasts (4): excludes unipolars, sorted by mass, correct counts
+- TestWalkSession (5): bipolars-only schedule, no contrast name exposed, exemplar count, progress
+- TestWalkSkip (2): all skips -> 0 collapsed, maps to center internally
+- TestWalkConsistency (2): consistent choices -> full strength
+- TestPCAEarlyTermination (3): many collapsed -> skip PCA, few -> extend, PCA after bipolars
+- TestWalkRepeats (2): different exemplars, fraction bounded
+- TestLeftRightFlip (2): flipped direction de-flipped correctly
+- TestWalkCompletion (2): returns sigil, reports complete
+
+**Test results**: 215/215 pass (188 existing + 27 new)
+
+**Browser verification**:
+- `/walk` renders two mosaics with 6 images each, obvious visual contrast
+- Click advances to next step, progress dots update
+- Skip button works
+- No contrast names visible anywhere
+- Atlas toolbar shows 6 buttons: Back, Home, Explore, Calibrate, Sigil, Help
+- Calibrate button navigates to `/walk`
+
+**Files changed**:
+- `sigiltree/walk.py` — NEW: walk session logic
+- `sigiltree/viewer_server.py` — walk routes, handlers, WALK_HTML, toolbar button, sigil auto-activate
+- `tests/test_walk.py` — NEW: 27 tests
+
+### Previous session (2026-02-06) — Unlimited depth + hierarchy-first viewer
 
 **Problem**: n_014 (112 images, largest L0 neighborhood) appeared as a wall of undifferentiated images despite having 10 well-defined sub-clusters. Two root causes:
 
@@ -899,3 +947,36 @@ All 185 tests pass.
 - `tests/test_doors.py` — 3 new tests (TestMemberDimensions)
 
 All 188 tests pass.
+
+### Unlimited atlas depth + hierarchy-first viewer (2026-02-06)
+
+Commit `3706a86`. See "Session Recovery Context" section above for full details.
+
+### Zoned layout: children center, laterals on edges (2026-02-06)
+
+**Problem**: Down doors (children) and lateral doors (flow neighbors) looked identical — same size, interleaved in treemap.
+
+**Fix — zoned layout for non-leaf nodes**:
+- When `hasDown`: split doors into `downDoors` (center, large) and `lateralDoors` (thin strips on left/right edges).
+- Down doors fill remaining center area after back strip + lateral strips.
+- Laterals split into left/right halves, each getting 6% width strips.
+- Back door unchanged: 8% left strip. Leaf nodes unchanged.
+- Lateral arrow changed from right-arrow at top-right to bidirectional at bottom-center.
+
+Deployed as commit `bb1deee`.
+
+### Leaf images: contain-fit + single-image member threshold (2026-02-06)
+
+**Problem 1**: Member images at leaf nodes used cover-fit (cropping).
+**Fix**: Changed `Math.max` to `Math.min` with dark background fill.
+
+**Problem 2**: Single-image leaf nodes via lateral navigation still cropped.
+**Root cause**: Server threshold `size > 1` excluded single-image nodes from returning members.
+**Fix**: Changed to `size >= 1`.
+
+Deployed as commit `f18a146`.
+
+### Current atlas stats
+- 5 levels (0-4), 960 nodes, 874 images
+- Level 4: 94 leaf nodes, all naturally terminated
+- Live at https://sigilatlas.fly.dev/

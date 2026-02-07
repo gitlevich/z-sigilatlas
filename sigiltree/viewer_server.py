@@ -40,6 +40,7 @@ def create_app(artifact_dir: Path) -> web.Application:
     app["artifact_dir"] = artifact_dir
     app["arcade_sessions"] = {}  # user_id -> ArcadeSession
     app["flythrough_sessions"] = {}  # user_id -> FlythroughSession
+    app["walk_sessions"] = {}  # user_id -> WalkSession
     app["_flow_cache"] = {}  # level -> flow_graph
     app["_meta_cache"] = {}  # level -> meta dict
     app["_stats_cache"] = None  # ride stats
@@ -60,6 +61,9 @@ def create_app(artifact_dir: Path) -> web.Application:
     app.router.add_get("/api/arcade/prompt", handle_arcade_prompt)
     app.router.add_post("/api/arcade/choose", handle_arcade_choose)
     app.router.add_get("/api/arcade/summary", handle_arcade_summary)
+    app.router.add_get("/walk", handle_walk_page)
+    app.router.add_post("/api/walk/start", handle_walk_start)
+    app.router.add_post("/api/walk/choose", handle_walk_choose)
     app.router.add_get("/api/sigil", handle_sigil_api)
     app.router.add_get("/atlas", handle_atlas_page)
     app.router.add_get("/api/atlas/meta", handle_atlas_meta)
@@ -266,6 +270,56 @@ async def handle_sigil_api(request: web.Request) -> web.Response:
     if sigil is None:
         return web.json_response({"error": "No sigil found"}, status=404)
     return web.json_response(sigil)
+
+
+async def handle_walk_page(request: web.Request) -> web.Response:
+    return web.Response(text=WALK_HTML, content_type="text/html")
+
+
+async def handle_walk_start(request: web.Request) -> web.Response:
+    from sigiltree.walk import WalkSession
+    artifact_dir = request.app["artifact_dir"]
+    lib_path = artifact_dir / "contrasts" / "contrast_library.json"
+    if not lib_path.exists():
+        return web.json_response({"error": "No contrast library found"}, status=404)
+
+    body = await request.json() if request.content_length else {}
+    user_id = body.get("user_id", "default")
+
+    library = json.loads(lib_path.read_text())
+    session = WalkSession(library, user_id=user_id)
+    request.app["walk_sessions"][user_id] = session
+
+    step = session.current_step
+    return web.json_response({
+        "status": "started",
+        "step": session.step_to_dict(step) if step else None,
+        "progress": session.progress,
+    })
+
+
+async def handle_walk_choose(request: web.Request) -> web.Response:
+    body = await request.json()
+    user_id = body.get("user_id", "default")
+    direction = body.get("direction")
+
+    if direction not in ("left", "right", "skip"):
+        return web.json_response(
+            {"error": "direction must be left/right/skip"}, status=400
+        )
+
+    session = request.app["walk_sessions"].get(user_id)
+    if session is None:
+        return web.json_response({"error": "No active walk session"}, status=404)
+
+    result = session.record_choice(direction)
+
+    if result["status"] == "complete":
+        from sigiltree.arcade import save_sigil
+        artifact_dir = request.app["artifact_dir"]
+        save_sigil(result["sigil"], artifact_dir)
+
+    return web.json_response(result)
 
 
 async def handle_atlas_page(request: web.Request) -> web.Response:
@@ -1489,6 +1543,264 @@ document.addEventListener('keydown', (e) => {
 </html>
 """
 
+WALK_HTML = r"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Calibration Walk</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+  background: #111; color: #ccc; font-family: system-ui, sans-serif;
+  height: 100vh; overflow: hidden; display: flex; flex-direction: column;
+  user-select: none; -webkit-user-select: none;
+}
+.arena {
+  flex: 1; display: flex; gap: 24px;
+  align-items: center; justify-content: center;
+  padding: 24px 32px 12px;
+}
+.mosaic-col {
+  flex: 1; display: flex; flex-direction: column;
+  align-items: center; gap: 6px; cursor: pointer;
+  border-radius: 10px; padding: 4px;
+  border: 3px solid transparent;
+  transition: border-color 0.2s, background 0.2s;
+}
+.mosaic-col:hover { border-color: #444; }
+.mosaic-col:hover .key-hint { color: #999; }
+.mosaic-col.flash-left { border-color: #68f; background: rgba(100,130,255,0.08); }
+.mosaic-col.flash-left .key-hint { color: #68f; }
+.mosaic-col.flash-right { border-color: #f86; background: rgba(255,130,100,0.08); }
+.mosaic-col.flash-right .key-hint { color: #f86; }
+.key-hint {
+  font-size: 20px; color: #555; text-align: center;
+  letter-spacing: 1px; user-select: none;
+  transition: color 0.2s;
+}
+.mosaic {
+  width: 100%; display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 3px; max-width: 45vw; max-height: 76vh;
+  border-radius: 8px;
+  padding: 4px; position: relative;
+  transition: opacity 0.2s;
+}
+.mosaic img {
+  width: 100%; aspect-ratio: 1; object-fit: cover;
+  border-radius: 3px; display: block;
+  background: #1a1a1a;
+}
+.mosaic.loading { opacity: 0.3; pointer-events: none; }
+.skip-zone {
+  display: flex; align-items: center; justify-content: center;
+  padding: 14px 0 6px;
+}
+.skip-btn {
+  background: rgba(255,255,255,0.05); border: 1px solid #555; color: #999;
+  font-size: 15px; padding: 10px 32px; border-radius: 20px;
+  cursor: pointer; transition: color 0.15s, border-color 0.15s, background 0.15s;
+  letter-spacing: 0.5px;
+}
+.skip-btn:hover { color: #ddd; border-color: #888; background: rgba(255,255,255,0.1); }
+.skip-btn .hint { font-size: 11px; color: #666; margin-left: 8px; }
+.progress-bar {
+  display: flex; gap: 5px; justify-content: center;
+  padding: 12px 24px 20px; flex-wrap: wrap;
+}
+.dot {
+  width: 7px; height: 7px; border-radius: 50%; background: #282828;
+  transition: background 0.2s;
+}
+.dot.done { background: #4a8; }
+.dot.current { background: #6cf; transform: scale(1.3); }
+.done-overlay {
+  position: fixed; inset: 0; background: rgba(17,17,17,0.95);
+  display: flex; align-items: center; justify-content: center;
+  flex-direction: column; gap: 12px; z-index: 100;
+  opacity: 0; transition: opacity 0.4s; pointer-events: none;
+}
+.done-overlay.visible { opacity: 1; pointer-events: auto; }
+.done-msg { font-size: 24px; color: #ccc; font-weight: 300; }
+.done-detail { font-size: 14px; color: #666; }
+.exit-btn {
+  position: fixed; top: 12px; left: 16px; z-index: 50;
+  background: none; border: 1px solid #444; color: #888;
+  font-size: 13px; padding: 6px 14px; border-radius: 14px;
+  cursor: pointer; transition: color 0.15s, border-color 0.15s;
+}
+.exit-btn:hover { color: #ccc; border-color: #888; }
+.exit-btn .hint { font-size: 11px; color: #555; margin-left: 6px; }
+@media (max-width: 700px) {
+  .arena { flex-direction: column; gap: 12px; padding: 12px 16px 8px; }
+  .mosaic { max-width: 90vw; max-height: 36vh; }
+  .key-hint { font-size: 14px; }
+}
+</style>
+</head>
+<body>
+
+<button class="exit-btn" onclick="window.location='/atlas'">exit <span class="hint">[Esc]</span></button>
+<div class="arena">
+  <div class="mosaic-col" onclick="choose('left')">
+    <div id="mosaic-left" class="mosaic loading"></div>
+    <div class="key-hint">&larr;</div>
+  </div>
+  <div class="mosaic-col" onclick="choose('right')">
+    <div id="mosaic-right" class="mosaic loading"></div>
+    <div class="key-hint">&rarr;</div>
+  </div>
+</div>
+<div class="skip-zone">
+  <button class="skip-btn" onclick="choose('skip')">skip <span class="hint">[Space]</span></button>
+</div>
+<div id="progress" class="progress-bar"></div>
+<div id="done-overlay" class="done-overlay">
+  <div class="done-msg" id="done-msg">Preferences recorded.</div>
+  <div class="done-detail" id="done-detail">Returning to atlas...</div>
+</div>
+
+<script>
+let currentStep = null;
+let totalSteps = 0;
+let stepIndex = 0;
+let choosing = false;
+
+async function startWalk() {
+  const r = await fetch('/api/walk/start', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({user_id: 'default'}),
+  });
+  const data = await r.json();
+  if (data.status === 'started' && data.step) {
+    totalSteps = data.progress.total;
+    stepIndex = 0;
+    renderProgress(data.progress);
+    await showStep(data.step);
+  }
+}
+
+async function showStep(step) {
+  currentStep = step;
+  const ml = document.getElementById('mosaic-left');
+  const mr = document.getElementById('mosaic-right');
+
+  ml.classList.add('loading');
+  mr.classList.add('loading');
+
+  // Build image elements
+  const leftImgs = step.left_ids.map(id => {
+    const img = new Image();
+    img.src = `/thumbs/256/${id}.jpg`;
+    img.alt = '';
+    img.draggable = false;
+    return img;
+  });
+  const rightImgs = step.right_ids.map(id => {
+    const img = new Image();
+    img.src = `/thumbs/256/${id}.jpg`;
+    img.alt = '';
+    img.draggable = false;
+    return img;
+  });
+
+  // Wait for all images to load
+  const allImgs = [...leftImgs, ...rightImgs];
+  await Promise.all(allImgs.map(img =>
+    new Promise(resolve => {
+      img.onload = resolve;
+      img.onerror = resolve;
+    })
+  ));
+
+  ml.innerHTML = '';
+  mr.innerHTML = '';
+  leftImgs.forEach(img => ml.appendChild(img));
+  rightImgs.forEach(img => mr.appendChild(img));
+
+  ml.classList.remove('loading');
+  mr.classList.remove('loading');
+}
+
+async function choose(direction) {
+  if (choosing || !currentStep) return;
+  choosing = true;
+
+  // Flash animation on the whole column
+  const leftCol = document.getElementById('mosaic-left').parentElement;
+  const rightCol = document.getElementById('mosaic-right').parentElement;
+  if (direction === 'left') {
+    leftCol.classList.add('flash-left');
+  } else if (direction === 'right') {
+    rightCol.classList.add('flash-right');
+  }
+
+  const r = await fetch('/api/walk/choose', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({user_id: 'default', direction}),
+  });
+  const data = await r.json();
+
+  // Clear flash
+  setTimeout(() => {
+    leftCol.classList.remove('flash-left');
+    rightCol.classList.remove('flash-right');
+  }, 250);
+
+  if (data.status === 'complete') {
+    const collapsed = data.sigil ? data.sigil.collapsed_count : 0;
+    document.getElementById('done-msg').textContent = 'Preferences recorded.';
+    document.getElementById('done-detail').textContent =
+      collapsed > 0
+        ? `${collapsed} taste${collapsed > 1 ? 's' : ''} calibrated. Returning to atlas...`
+        : 'No strong preferences detected. Returning to atlas...';
+    document.getElementById('done-overlay').classList.add('visible');
+    // Fill all remaining dots
+    renderProgress({current: totalSteps, total: totalSteps, choices_made: totalSteps});
+    setTimeout(() => { window.location = '/atlas?sigil=1'; }, 1800);
+  } else if (data.step) {
+    totalSteps = data.progress.total;
+    stepIndex = data.progress.current;
+    renderProgress(data.progress);
+    await showStep(data.step);
+  }
+  choosing = false;
+}
+
+function renderProgress(progress) {
+  const bar = document.getElementById('progress');
+  bar.innerHTML = '';
+  for (let i = 0; i < progress.total; i++) {
+    const dot = document.createElement('div');
+    dot.className = 'dot';
+    if (i < progress.current) dot.classList.add('done');
+    if (i === progress.current) dot.classList.add('current');
+    bar.appendChild(dot);
+  }
+}
+
+// Keyboard controls
+document.addEventListener('keydown', e => {
+  if (e.key === 'ArrowLeft' || e.key === 'a' || e.key === 'A') {
+    e.preventDefault(); choose('left');
+  } else if (e.key === 'ArrowRight' || e.key === 'd' || e.key === 'D') {
+    e.preventDefault(); choose('right');
+  } else if (e.key === ' ' || e.key === 'ArrowUp') {
+    e.preventDefault(); choose('skip');
+  } else if (e.key === 'Escape') {
+    window.location = '/atlas';
+  }
+});
+
+startWalk();
+</script>
+</body>
+</html>
+"""
+
 ATLAS_VIEWER_HTML = r"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -1632,6 +1944,7 @@ ATLAS_VIEWER_HTML = r"""<!DOCTYPE html>
   <button id="toolbar-back" title="Back" onclick="exitToParent()" style="opacity:0.3">&#x21A9;</button>
   <button id="toolbar-home" title="Home" onclick="goHome()" style="opacity:0.3">&#x2302;</button>
   <button id="toolbar-explore" title="Explore" onclick="toggleFlythrough()">&#x25CE;</button>
+  <button id="toolbar-walk" title="Calibrate" onclick="window.location='/walk'">&#x2261;</button>
   <button id="toolbar-sigil" title="Sigil overlay" onclick="toggleSigil()">&#x2606;</button>
   <button id="toolbar-help" title="Help" onclick="toggleHelp()">?</button>
 </div>
@@ -1641,17 +1954,18 @@ ATLAS_VIEWER_HTML = r"""<!DOCTYPE html>
     <h2>Sigil Atlas</h2>
     <div class="intro">
       <p>A labyrinth of photographs. Every image is grouped with the ones it most resembles &mdash; not by category, but by what it <em>looks and feels like</em>.</p>
-      <p>Click any tile to enter it. Inside, you see doors: some lead deeper into detail, some lead sideways to similar neighborhoods. There are no dead ends. The space loops.</p>
-      <p>Navigate toward what attracts you. The system silently learns your preferences and builds a personal <em>sigil</em> that reshapes what the atlas highlights for you.</p>
+      <p>Click any tile to enter it. Inside, you find smaller neighborhoods nested within. There are no dead ends.</p>
     </div>
     <span class="section-label">Navigate</span>
-    <div class="key-row"><kbd>Click</kbd><span class="key-desc">Enter a sigil (any tile is a door)</span></div>
-    <div class="key-row"><kbd>Drag</kbd><span class="key-desc">Pan around the atlas</span></div>
+    <div class="key-row"><kbd>Click</kbd><span class="key-desc">Enter a neighborhood</span></div>
+    <div class="key-row"><kbd>Drag</kbd><span class="key-desc">Pan around</span></div>
+    <div class="key-row"><kbd>Esc</kbd><span class="key-desc">Back one level</span></div>
     <span class="section-label">Toolbar</span>
     <div class="key-row"><kbd>&#x21A9;</kbd><span class="key-desc">Back one level</span></div>
-    <div class="key-row"><kbd>&#x2302;</kbd><span class="key-desc">Animated return home</span></div>
-    <div class="key-row"><kbd>&#x25CE;</kbd><span class="key-desc">Start / finish exploration</span></div>
-    <div class="key-row"><kbd>&#x2606;</kbd><span class="key-desc">Toggle your sigil overlay</span></div>
+    <div class="key-row"><kbd>&#x2302;</kbd><span class="key-desc">Return home</span></div>
+    <div class="key-row"><kbd>&#x25CE;</kbd><span class="key-desc">Auto-explore (flythrough)</span></div>
+    <div class="key-row"><kbd>&#x2261;</kbd><span class="key-desc">Calibrate your taste (left/right walk)</span></div>
+    <div class="key-row"><kbd>&#x2606;</kbd><span class="key-desc">Toggle your taste overlay on/off</span></div>
     <div class="dismiss">Click anywhere to begin</div>
   </div>
 </div>
@@ -2572,6 +2886,12 @@ async function init() {
     fetchNodeLabels(0);
     fetchZsummaries(0);
     scheduleFrame();
+
+    // Auto-activate sigil overlay when returning from calibration walk
+    if (new URLSearchParams(window.location.search).get('sigil') === '1') {
+      toggleSigil();
+      history.replaceState(null, '', '/atlas');
+    }
   } catch (e) {
     document.getElementById('stats').textContent = 'Error loading atlas: ' + e.message;
   }

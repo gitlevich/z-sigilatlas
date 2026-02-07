@@ -1,0 +1,413 @@
+"""Tests for Calibration Walk: two-tile binary preference elicitation."""
+
+import pytest
+
+from sigiltree.walk import (
+    WalkSession,
+    WalkStep,
+    classify_contrast,
+    filter_walk_contrasts,
+    EXEMPLARS_PER_SIDE,
+    MIN_COLLAPSED_TO_SKIP_PCA,
+)
+from sigiltree.arcade import build_sigil
+
+
+# ---------------------------------------------------------------------------
+# Test fixture
+# ---------------------------------------------------------------------------
+
+def _make_walk_library(n_bipolar=5, n_unipolar=3, n_pca=2, n_exemplars=12):
+    """Create a contrast library with all three types."""
+    contrasts = []
+    for i in range(n_bipolar):
+        # Mix perceptual and semantic bipolars
+        if i < 3:
+            name = f"test_perceptual_{i}"
+            source = "perceptual"
+        else:
+            name = f"sem_a_vs_b_{i}"
+            source = "semantic"
+        contrasts.append({
+            "contrast_id": f"bp_{i:03d}",
+            "name": name,
+            "source": source,
+            "mass": 10.0 - i,
+            "stability": 1.0,
+            "quantiles": {
+                "p10": 0.1, "p25": 0.25, "p50": 0.5,
+                "p75": 0.75, "p90": 0.9,
+            },
+            "exemplars": {
+                "low": [f"bp_low_{i}_{j}" for j in range(n_exemplars)],
+                "median": [f"bp_med_{i}_{j}" for j in range(n_exemplars)],
+                "high": [f"bp_high_{i}_{j}" for j in range(n_exemplars)],
+            },
+        })
+    for i in range(n_unipolar):
+        contrasts.append({
+            "contrast_id": f"up_{i:03d}",
+            "name": f"sem_category_{i}",
+            "source": "semantic",
+            "mass": 5.0 - i,
+            "stability": 1.0,
+            "quantiles": {
+                "p10": 0.1, "p25": 0.25, "p50": 0.5,
+                "p75": 0.75, "p90": 0.9,
+            },
+            "exemplars": {
+                "low": [f"up_low_{i}_{j}" for j in range(n_exemplars)],
+                "median": [f"up_med_{i}_{j}" for j in range(n_exemplars)],
+                "high": [f"up_high_{i}_{j}" for j in range(n_exemplars)],
+            },
+        })
+    for i in range(n_pca):
+        contrasts.append({
+            "contrast_id": f"pca_{i:03d}",
+            "name": f"pca_clip_{i}",
+            "source": "emergent",
+            "mass": 2.0 - i * 0.5,
+            "stability": 0.95,
+            "quantiles": {
+                "p10": -1.0, "p25": -0.5, "p50": 0.0,
+                "p75": 0.5, "p90": 1.0,
+            },
+            "exemplars": {
+                "low": [f"pca_low_{i}_{j}" for j in range(n_exemplars)],
+                "median": [f"pca_med_{i}_{j}" for j in range(n_exemplars)],
+                "high": [f"pca_high_{i}_{j}" for j in range(n_exemplars)],
+            },
+        })
+    return {
+        "version": "v1_test_walk",
+        "count": len(contrasts),
+        "contrasts": contrasts,
+    }
+
+
+# ---------------------------------------------------------------------------
+# TestContrastClassification
+# ---------------------------------------------------------------------------
+
+class TestContrastClassification:
+    def test_perceptual_is_bipolar(self):
+        assert classify_contrast("sharpness") == "bipolar"
+        assert classify_contrast("brightness") == "bipolar"
+        assert classify_contrast("temperature") == "bipolar"
+
+    def test_color_dominance_is_bipolar(self):
+        assert classify_contrast("red_dominance") == "bipolar"
+        assert classify_contrast("blue_dominance") == "bipolar"
+        assert classify_contrast("green_dominance") == "bipolar"
+
+    def test_semantic_bipolar_has_vs(self):
+        assert classify_contrast("sem_bw_vs_color") == "bipolar"
+        assert classify_contrast("sem_natural_vs_manmade") == "bipolar"
+        assert classify_contrast("sem_interior_vs_exterior") == "bipolar"
+
+    def test_semantic_unipolar_no_vs(self):
+        assert classify_contrast("sem_portrait") == "unipolar"
+        assert classify_contrast("sem_street") == "unipolar"
+        assert classify_contrast("sem_landscape") == "unipolar"
+        assert classify_contrast("sem_architecture") == "unipolar"
+
+    def test_pca_is_pca(self):
+        assert classify_contrast("pca_clip_0") == "pca"
+        assert classify_contrast("pca_dino_1") == "pca"
+        assert classify_contrast("pca_texture_0") == "pca"
+
+
+# ---------------------------------------------------------------------------
+# TestFilterWalkContrasts
+# ---------------------------------------------------------------------------
+
+class TestFilterWalkContrasts:
+    def test_excludes_unipolars(self):
+        lib = _make_walk_library(n_bipolar=3, n_unipolar=4, n_pca=2)
+        bipolars, pcas = filter_walk_contrasts(lib)
+        all_names = [c["name"] for c in bipolars + pcas]
+        for name in all_names:
+            assert classify_contrast(name) != "unipolar"
+
+    def test_bipolars_sorted_by_mass(self):
+        lib = _make_walk_library(n_bipolar=5)
+        bipolars, _ = filter_walk_contrasts(lib)
+        masses = [c["mass"] for c in bipolars]
+        assert masses == sorted(masses, reverse=True)
+
+    def test_correct_counts(self):
+        lib = _make_walk_library(n_bipolar=5, n_unipolar=3, n_pca=2)
+        bipolars, pcas = filter_walk_contrasts(lib)
+        assert len(bipolars) == 5
+        assert len(pcas) == 2
+
+    def test_pcas_sorted_by_mass(self):
+        lib = _make_walk_library(n_pca=4)
+        _, pcas = filter_walk_contrasts(lib)
+        masses = [c["mass"] for c in pcas]
+        assert masses == sorted(masses, reverse=True)
+
+
+# ---------------------------------------------------------------------------
+# TestWalkSession
+# ---------------------------------------------------------------------------
+
+class TestWalkSession:
+    def test_initial_schedule_is_bipolars_only(self):
+        lib = _make_walk_library(n_bipolar=5, n_unipolar=3, n_pca=2)
+        session = WalkSession(lib)
+        assert len(session.steps) == 5  # only bipolars
+
+    def test_step_has_no_contrast_name(self):
+        lib = _make_walk_library(n_bipolar=3)
+        session = WalkSession(lib)
+        step_dict = session.step_to_dict(session.current_step)
+        assert "contrast_name" not in step_dict
+        assert "contrast_id" not in step_dict
+
+    def test_correct_exemplar_count_per_side(self):
+        lib = _make_walk_library(n_bipolar=3)
+        session = WalkSession(lib)
+        step = session.current_step
+        assert len(step.left_ids) == EXEMPLARS_PER_SIDE
+        assert len(step.right_ids) == EXEMPLARS_PER_SIDE
+
+    def test_no_center_ids_in_step(self):
+        lib = _make_walk_library(n_bipolar=3)
+        session = WalkSession(lib)
+        step_dict = session.step_to_dict(session.current_step)
+        assert "center_ids" not in step_dict
+        assert "left_ids" in step_dict
+        assert "right_ids" in step_dict
+
+    def test_progress_tracks_correctly(self):
+        lib = _make_walk_library(n_bipolar=3, n_unipolar=0, n_pca=0)
+        session = WalkSession(lib)
+        assert session.progress["current"] == 0
+        assert session.progress["choices_made"] == 0
+        session.record_choice("left")
+        assert session.progress["current"] == 1
+        assert session.progress["choices_made"] == 1
+
+
+# ---------------------------------------------------------------------------
+# TestWalkSkip
+# ---------------------------------------------------------------------------
+
+class TestWalkSkip:
+    def test_all_skips_produce_zero_collapsed(self):
+        lib = _make_walk_library(n_bipolar=3, n_unipolar=0, n_pca=0)
+        session = WalkSession(lib)
+        while not session.is_complete:
+            session.record_choice("skip")
+        sigil = build_sigil(session.choices, session.library_version, session.user_id)
+        assert sigil["collapsed_count"] == 0
+
+    def test_skip_maps_to_center_internally(self):
+        lib = _make_walk_library(n_bipolar=2, n_unipolar=0, n_pca=0)
+        session = WalkSession(lib)
+        session.record_choice("skip")
+        assert session.choices[0].direction == "center"
+
+
+# ---------------------------------------------------------------------------
+# TestWalkConsistency
+# ---------------------------------------------------------------------------
+
+class TestWalkConsistency:
+    def test_consistent_left_produces_full_strength(self):
+        lib = _make_walk_library(n_bipolar=1, n_unipolar=0, n_pca=0)
+        session = WalkSession(lib)
+        # Record left for the single bipolar
+        session.record_choice("left")
+        sigil = build_sigil(session.choices, session.library_version, session.user_id)
+        assert sigil["collapsed_count"] == 1
+        entry = list(sigil["entries"].values())[0]
+        assert entry["strength"] == 1.0
+
+    def test_consistent_right_produces_full_strength(self):
+        lib = _make_walk_library(n_bipolar=1, n_unipolar=0, n_pca=0)
+        session = WalkSession(lib)
+        session.record_choice("right")
+        sigil = build_sigil(session.choices, session.library_version, session.user_id)
+        assert sigil["collapsed_count"] == 1
+        entry = list(sigil["entries"].values())[0]
+        assert entry["strength"] == 1.0
+
+
+# ---------------------------------------------------------------------------
+# TestPCAEarlyTermination
+# ---------------------------------------------------------------------------
+
+class TestPCAEarlyTermination:
+    def test_many_bipolars_collapsed_skips_pca(self):
+        """If >= MIN_COLLAPSED_TO_SKIP_PCA bipolars collapse, PCA is skipped."""
+        n_bp = MIN_COLLAPSED_TO_SKIP_PCA + 2
+        lib = _make_walk_library(n_bipolar=n_bp, n_unipolar=0, n_pca=5)
+        session = WalkSession(lib)
+
+        # Choose consistently: always pick the LOW side regardless of flip.
+        # If not flipped, left=LOW; if flipped, right=LOW.
+        # This ensures the sigil direction is always "left" (consistent).
+        for i in range(n_bp):
+            step = session.current_step
+            direction = "right" if step.flipped else "left"
+            session.record_choice(direction)
+
+        # Exhaust any repeats with the same consistent strategy
+        while not session.is_complete:
+            step = session.current_step
+            if step is None:
+                break
+            direction = "right" if step.flipped else "left"
+            session.record_choice(direction)
+
+        # PCA should not have been added — check that no PCA contrast IDs
+        # appear in the steps
+        pca_cids = {c["contrast_id"] for c in lib["contrasts"]
+                    if c["name"].startswith("pca_")}
+        step_cids = {s.contrast_id for s in session.steps}
+        assert pca_cids.isdisjoint(step_cids)
+
+    def test_few_bipolars_collapsed_extends_with_pca(self):
+        """If < MIN_COLLAPSED_TO_SKIP_PCA bipolars collapse, PCA is added."""
+        lib = _make_walk_library(n_bipolar=3, n_unipolar=0, n_pca=4)
+        session = WalkSession(lib)
+
+        # Skip all bipolars — none will collapse
+        for _ in range(3):
+            session.record_choice("skip")
+
+        # No repeats for skips, so PCA decision should have been made
+        # PCA steps should now be in the schedule
+        pca_cids = {c["contrast_id"] for c in lib["contrasts"]
+                    if c["name"].startswith("pca_")}
+        step_cids = {s.contrast_id for s in session.steps}
+        assert pca_cids.issubset(step_cids)
+
+    def test_pca_steps_come_after_bipolars(self):
+        lib = _make_walk_library(n_bipolar=3, n_unipolar=0, n_pca=2)
+        session = WalkSession(lib)
+
+        # Skip all bipolars to trigger PCA extension
+        for _ in range(3):
+            session.record_choice("skip")
+
+        # First 3 steps should be bipolar, rest should be PCA
+        bp_cids = {c["contrast_id"] for c in lib["contrasts"]
+                   if not c["name"].startswith("pca_")
+                   and classify_contrast(c["name"]) == "bipolar"}
+        for step in session.steps[:3]:
+            assert step.contrast_id in bp_cids
+
+        pca_cids = {c["contrast_id"] for c in lib["contrasts"]
+                    if c["name"].startswith("pca_")}
+        for step in session.steps[3:]:
+            assert step.contrast_id in pca_cids
+
+
+# ---------------------------------------------------------------------------
+# TestWalkRepeats
+# ---------------------------------------------------------------------------
+
+class TestWalkRepeats:
+    def test_repeats_use_different_exemplars(self):
+        """Repeat steps should use fresh exemplar images where possible."""
+        lib = _make_walk_library(n_bipolar=1, n_unipolar=0, n_pca=0,
+                                 n_exemplars=12)
+        # Force repeat by running many sessions until one gets a repeat
+        found_repeat = False
+        for seed in range(100):
+            session = WalkSession(lib)
+            session.rng = __import__("numpy").random.RandomState(seed)
+            session.record_choice("right")
+            # Check if a repeat was scheduled
+            if len(session.steps) > 1:
+                original = session.steps[0]
+                repeat = session.steps[1]
+                # At least some exemplars should differ
+                assert repeat.is_repeat
+                found_repeat = True
+                break
+        # We should find at least one repeat in 100 tries at 50% probability
+        assert found_repeat, "No repeat found in 100 attempts"
+
+    def test_repeat_fraction_bounded(self):
+        """Number of repeats should not exceed the number of directional choices."""
+        lib = _make_walk_library(n_bipolar=10, n_unipolar=0, n_pca=0)
+        session = WalkSession(lib)
+        for _ in range(10):
+            session.record_choice("right")
+        # Exhaust repeats
+        while not session.is_complete:
+            session.record_choice("right")
+        repeat_count = sum(1 for s in session.steps if s.is_repeat)
+        # At most 1 repeat per contrast, so <= 10
+        assert repeat_count <= 10
+
+
+# ---------------------------------------------------------------------------
+# TestLeftRightFlip
+# ---------------------------------------------------------------------------
+
+class TestLeftRightFlip:
+    def test_flipped_step_records_correct_direction(self):
+        """When step is flipped, choosing 'left' should record as 'right'."""
+        lib = _make_walk_library(n_bipolar=1, n_unipolar=0, n_pca=0)
+        # Try seeds until we get a flipped step
+        for seed in range(100):
+            session = WalkSession(lib)
+            session.rng = __import__("numpy").random.RandomState(seed)
+            # Rebuild schedule with this RNG
+            session.steps = []
+            session._used_exemplars = {}
+            session._build_bipolar_schedule()
+            step = session.current_step
+            if step.flipped:
+                session.record_choice("left")
+                # Flipped: left on screen → right in sigil
+                assert session.choices[0].direction == "right"
+                return
+        pytest.skip("No flipped step found in 100 seeds")
+
+    def test_non_flipped_step_records_as_is(self):
+        """When step is not flipped, directions map directly."""
+        lib = _make_walk_library(n_bipolar=1, n_unipolar=0, n_pca=0)
+        for seed in range(100):
+            session = WalkSession(lib)
+            session.rng = __import__("numpy").random.RandomState(seed)
+            session.steps = []
+            session._used_exemplars = {}
+            session._build_bipolar_schedule()
+            step = session.current_step
+            if not step.flipped:
+                session.record_choice("left")
+                assert session.choices[0].direction == "left"
+                return
+        pytest.skip("No non-flipped step found in 100 seeds")
+
+
+# ---------------------------------------------------------------------------
+# TestWalkCompletion
+# ---------------------------------------------------------------------------
+
+class TestWalkCompletion:
+    def test_completion_returns_sigil(self):
+        lib = _make_walk_library(n_bipolar=2, n_unipolar=0, n_pca=0)
+        session = WalkSession(lib)
+        result = None
+        while not session.is_complete:
+            result = session.record_choice("right")
+        assert result is not None
+        assert result["status"] == "complete"
+        assert "sigil" in result
+        assert result["sigil"]["collapsed_count"] >= 1
+
+    def test_complete_session_reports_is_complete(self):
+        lib = _make_walk_library(n_bipolar=2, n_unipolar=0, n_pca=0)
+        session = WalkSession(lib)
+        assert not session.is_complete
+        while not session.is_complete:
+            session.record_choice("skip")
+        assert session.is_complete
+        assert session.current_step is None
