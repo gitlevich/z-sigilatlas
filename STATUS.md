@@ -4,12 +4,12 @@ Current state snapshot for session resumption. See [JOURNAL.md](JOURNAL.md) for 
 
 ## Current State (2026-02-07)
 
-Phase 16 complete. Taste profile radar toggle on atlas page. 207 tests pass.
+Phase 17 complete. Walk progress pie replaces radar. 207 tests pass.
 
 ### What's live
 
 - **Atlas viewer** — 5-level treemap of 874 images in 960 nodes. Click to enter, back door to exit. No dead ends.
-- **Calibration walk** (`/walk`) — 17 bipolar contrasts shown as image pairs. Left/right/skip. Produces sigil in ~2 minutes. Live radar chart builds up as you choose. Current contrast name displayed at top.
+- **Calibration walk** (`/walk`) — 17 bipolar contrasts shown as image pairs. Left/right/skip. Produces sigil in ~2 minutes. Progress pie shows all contrasts as a donut ring; slices fill amber (right) or blue (left) as you choose, gray for skipped. Current contrast name displayed at top.
 - **Category filter** (`/categories`) — radar chart with 11 unipolar semantic categories. Multiplicative gate on sigil scores: `final_score = walk_score * category_gate`.
 - **Sigil overlay** — toggle in toolbar. High-scoring nodes brighten + golden halo. Sigil reorder: best nodes gravitate to center and grow.
 - **Taste profile** — radar button in atlas toolbar (visible only after calibration). Shows spider chart of calibrated contrast preferences with direction-colored spokes.

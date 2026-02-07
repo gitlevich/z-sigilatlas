@@ -2,6 +2,23 @@
 
 Chronological record of design decisions, implementations, and fixes. Newest first.
 
+## Phase 17: Walk Progress Pie (2026-02-07)
+
+Replaced the live sigil radar chart during calibration walk with a progress-oriented donut pie chart.
+The radar was misleading: all first-pass strengths are 1.0, producing a perfect circle that looks like
+a taste profile but isn't — it's just a progress tracker.
+
+**New design:** A ring of 17 equal slices, one per bipolar contrast, visible from the start. Three
+visual states: dark (untouched), gray (skipped), amber (chose right), blue (chose left). Labels
+follow the ring curvature. Count label shows collapsed/total.
+
+**Modified files:**
+- `sigiltree/viewer_server.py` — WALK_HTML JS: replaced `drawSigilRadar()` with `drawProgressPie()`,
+  updated `animateSigilUpdate()` for opacity-based animation, pie visible on walk start, skip tracking
+  with `skippedIds` set, removed unused `radarAngle()`/`radarEndpoint()` helpers
+
+**No server-side changes.** Frontend-only. All 207 tests pass.
+
 ## Phase 13: Categorical Calibration (2026-02-07)
 
 Branch `phase13-category-radar`. The 11 unipolar semantic categories (portrait, landscape, architecture,

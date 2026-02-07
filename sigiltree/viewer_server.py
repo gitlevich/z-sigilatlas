@@ -575,7 +575,7 @@ async def handle_atlas_taste_sigil(request: web.Request) -> web.Response:
     if sigil is None:
         return web.json_response({"error": "No sigil found"}, status=404)
 
-    # Only include named visual bipolar contrasts (not sem_ categories or pca_ emergent)
+    # Include all bipolar contrasts, exclude unipolar sem_ (no _vs_) and pca_
     entries = {
         cid: {
             "name": e["contrast_name"],
@@ -583,8 +583,8 @@ async def handle_atlas_taste_sigil(request: web.Request) -> web.Response:
             "str": e["strength"],
         }
         for cid, e in sigil.get("entries", {}).items()
-        if not e["contrast_name"].startswith("sem_")
-        and not e["contrast_name"].startswith("pca_")
+        if not e["contrast_name"].startswith("pca_")
+        and not (e["contrast_name"].startswith("sem_") and "_vs_" not in e["contrast_name"])
     }
 
     return web.json_response({
@@ -1766,14 +1766,14 @@ let totalSteps = 0;
 let stepIndex = 0;
 let choosing = false;
 
-// Live sigil radar state
+// Live progress pie state
 let radarContrasts = [];   // [{id, name}] — all bipolar contrasts
 let sigilEntries = {};     // {contrast_id: {name, dir, str}} from partial_sigil
 let animValues = {};       // {contrast_id: current_animated_value}
+let skippedIds = new Set(); // contrast IDs that were skipped
 let radarCtx = null;
 const RADAR_SIZE = 220;
-const RADAR_PAD = 36;
-const RADAR_LABEL_PAD = 16;
+const RADAR_PAD = 40;
 
 function formatContrastName(name) {
   // sem_abstract_vs_representational -> abstract / representational
@@ -1791,132 +1791,98 @@ function formatContrastName(name) {
   return s;
 }
 
-function radarAngle(i, n) {
-  return -Math.PI / 2 + (2 * Math.PI * i) / n;
-}
-
-function radarEndpoint(cx, cy, r, i, n) {
-  const a = radarAngle(i, n);
-  return [cx + Math.cos(a) * r, cy + Math.sin(a) * r];
-}
-
-function drawSigilRadar() {
+function drawProgressPie() {
   if (!radarCtx || radarContrasts.length === 0) return;
   const n = radarContrasts.length;
   const cx = RADAR_SIZE / 2;
   const cy = RADAR_SIZE / 2;
-  const r = cx - RADAR_PAD;
+  const outerR = cx - RADAR_PAD;
+  const innerR = outerR * 0.52;
+  const sliceGap = 0.02;
+  const sliceAngle = (2 * Math.PI - n * sliceGap) / n;
 
   radarCtx.clearRect(0, 0, RADAR_SIZE, RADAR_SIZE);
 
-  // Sort contrasts: collapsed by strength descending, then uncollapsed
-  // This shapes the polygon into a teardrop
-  const order = radarContrasts.map((c, i) => ({
-    ...c, origIdx: i,
-    val: animValues[c.id] || 0,
-    entry: sigilEntries[c.id] || null,
-  }));
-  order.sort((a, b) => b.val - a.val);
+  // Alphabetical sort for stable layout
+  const ordered = [...radarContrasts].sort((a, b) => a.name.localeCompare(b.name));
 
-  // Guide rings
-  for (const frac of [0.33, 0.66, 1.0]) {
-    radarCtx.beginPath();
-    for (let i = 0; i <= n; i++) {
-      const [x, y] = radarEndpoint(cx, cy, r * frac, i, n);
-      if (i === 0) radarCtx.moveTo(x, y);
-      else radarCtx.lineTo(x, y);
-    }
-    radarCtx.closePath();
-    radarCtx.strokeStyle = frac === 1.0 ? '#383838' : '#2a2a2a';
-    radarCtx.lineWidth = 0.75;
-    radarCtx.stroke();
-  }
-
-  // Axis lines (dim)
   for (let i = 0; i < n; i++) {
-    const [ex, ey] = radarEndpoint(cx, cy, r, i, n);
-    radarCtx.beginPath();
-    radarCtx.moveTo(cx, cy);
-    radarCtx.lineTo(ex, ey);
-    const entry = order[i].entry;
-    radarCtx.strokeStyle = entry ? 'rgba(255,255,255,0.15)' : 'rgba(255,255,255,0.06)';
-    radarCtx.lineWidth = 0.75;
-    radarCtx.stroke();
-  }
+    const c = ordered[i];
+    const startAngle = -Math.PI / 2 + i * (sliceAngle + sliceGap);
+    const endAngle = startAngle + sliceAngle;
+    const entry = sigilEntries[c.id];
 
-  // Filled polygon (only if any collapsed)
-  const hasCollapsed = order.some(o => o.val > 0.01);
-  if (hasCollapsed) {
+    // Donut slice
     radarCtx.beginPath();
-    for (let i = 0; i < n; i++) {
-      const val = order[i].val;
-      const [x, y] = radarEndpoint(cx, cy, r * val, i, n);
-      if (i === 0) radarCtx.moveTo(x, y);
-      else radarCtx.lineTo(x, y);
-    }
+    radarCtx.arc(cx, cy, outerR, startAngle, endAngle);
+    radarCtx.arc(cx, cy, innerR, endAngle, startAngle, true);
     radarCtx.closePath();
 
-    // Count directions for fill color blend
-    let rightCount = 0, leftCount = 0;
-    for (const o of order) {
-      if (o.entry) {
-        if (o.entry.dir === 'right') rightCount++;
-        else leftCount++;
-      }
+    const opacity = animValues[c.id] || 0;
+    if (entry && opacity > 0.01) {
+      const baseColor = entry.dir === 'right' ? [255, 168, 0] : [104, 168, 255];
+      radarCtx.fillStyle = `rgba(${baseColor.join(',')}, ${0.15 + opacity * 0.55})`;
+    } else if (skippedIds.has(c.id)) {
+      radarCtx.fillStyle = '#282828';
+    } else {
+      radarCtx.fillStyle = '#1a1a1a';
     }
-    const rightRatio = rightCount / Math.max(1, rightCount + leftCount);
-    // Blend amber and blue based on direction mix
-    const fr = Math.round(255 * rightRatio + 100 * (1 - rightRatio));
-    const fg = Math.round(170 * rightRatio + 160 * (1 - rightRatio));
-    const fb = Math.round(0 * rightRatio + 255 * (1 - rightRatio));
-    radarCtx.fillStyle = `rgba(${fr},${fg},${fb},0.15)`;
     radarCtx.fill();
-    radarCtx.strokeStyle = `rgba(${fr},${fg},${fb},0.5)`;
-    radarCtx.lineWidth = 1.5;
-    radarCtx.stroke();
-  }
 
-  // Handle dots + labels for collapsed contrasts
-  radarCtx.font = '9px system-ui, sans-serif';
-  radarCtx.textAlign = 'center';
-  radarCtx.textBaseline = 'middle';
-  for (let i = 0; i < n; i++) {
-    const o = order[i];
-    if (o.val < 0.01) continue;
-    const [hx, hy] = radarEndpoint(cx, cy, r * o.val, i, n);
-    // Dot
-    radarCtx.beginPath();
-    radarCtx.arc(hx, hy, 3.5, 0, Math.PI * 2);
-    radarCtx.fillStyle = o.entry && o.entry.dir === 'right' ? '#ffa800' : '#68a8ff';
-    radarCtx.fill();
-    // Label
-    const [lx, ly] = radarEndpoint(cx, cy, r * o.val + RADAR_LABEL_PAD, i, n);
-    radarCtx.fillStyle = o.entry && o.entry.dir === 'right' ? 'rgba(255,168,0,0.8)' : 'rgba(104,168,255,0.8)';
-    radarCtx.fillText(formatContrastName(o.name), lx, ly);
+    radarCtx.strokeStyle = '#333';
+    radarCtx.lineWidth = 0.5;
+    radarCtx.stroke();
+
+    // Label at midpoint of slice, outside the ring
+    const midAngle = (startAngle + endAngle) / 2;
+    const labelR = outerR + 8;
+    const lx = cx + Math.cos(midAngle) * labelR;
+    const ly = cy + Math.sin(midAngle) * labelR;
+
+    radarCtx.save();
+    radarCtx.translate(lx, ly);
+    let textAngle = midAngle;
+    // Flip text on left side for readability
+    if (midAngle > Math.PI / 2 || midAngle < -Math.PI / 2) {
+      textAngle += Math.PI;
+    }
+    radarCtx.rotate(textAngle);
+    radarCtx.font = '7px system-ui, sans-serif';
+    radarCtx.textAlign = (midAngle > Math.PI / 2 || midAngle < -Math.PI / 2) ? 'right' : 'left';
+    radarCtx.textBaseline = 'middle';
+
+    if (entry) {
+      radarCtx.fillStyle = entry.dir === 'right' ? 'rgba(255,168,0,0.7)' : 'rgba(104,168,255,0.7)';
+    } else if (skippedIds.has(c.id)) {
+      radarCtx.fillStyle = 'rgba(255,255,255,0.35)';
+    } else {
+      radarCtx.fillStyle = 'rgba(255,255,255,0.2)';
+    }
+    radarCtx.fillText(formatContrastName(c.name), 0, 0);
+    radarCtx.restore();
   }
 }
 
 function animateSigilUpdate(newEntries) {
   const targets = {};
   for (const c of radarContrasts) {
-    const e = newEntries[c.id];
-    targets[c.id] = e ? e.str : 0;
+    targets[c.id] = newEntries[c.id] ? 1.0 : (animValues[c.id] || 0);
   }
 
   const startVals = {...animValues};
   const startTime = performance.now();
-  const duration = 500;
+  const duration = 400;
 
   function tick(now) {
     const t = Math.min(1.0, (now - startTime) / duration);
-    const ease = t * (2 - t); // ease-out quad
+    const ease = t * (2 - t);
     for (const c of radarContrasts) {
       const from = startVals[c.id] || 0;
       const to = targets[c.id] || 0;
       animValues[c.id] = from + (to - from) * ease;
     }
     sigilEntries = newEntries;
-    drawSigilRadar();
+    drawProgressPie();
     if (t < 1.0) requestAnimationFrame(tick);
   }
   requestAnimationFrame(tick);
@@ -1934,6 +1900,8 @@ async function startWalk() {
     stepIndex = 0;
     radarContrasts = data.contrasts || [];
     radarCtx = document.getElementById('sigil-radar').getContext('2d');
+    drawProgressPie();
+    document.getElementById('sigil-radar').classList.add('visible');
     renderProgress(data.progress);
     await showStep(data.step);
   }
@@ -2014,13 +1982,23 @@ async function choose(direction) {
     rightCol.classList.remove('flash-right');
   }, 250);
 
-  // Update live sigil radar
+  // Track skipped contrasts
+  if (direction === 'skip' && currentStep && currentStep.contrast_name) {
+    const match = radarContrasts.find(c => c.name === currentStep.contrast_name);
+    if (match) {
+      skippedIds.add(match.id);
+      drawProgressPie();
+    }
+  }
+
+  // Update progress pie
+  const countEl = document.getElementById('sigil-count');
+  const collapsedCount = data.partial_sigil ? data.partial_sigil.collapsed_count : Object.keys(sigilEntries).length;
+  countEl.textContent = `${collapsedCount} / ${radarContrasts.length} tastes`;
+  countEl.classList.add('visible');
+
   if (data.partial_sigil && data.partial_sigil.collapsed_count > 0) {
     animateSigilUpdate(data.partial_sigil.entries);
-    document.getElementById('sigil-radar').classList.add('visible');
-    const countEl = document.getElementById('sigil-count');
-    countEl.classList.add('visible');
-    countEl.textContent = `${data.partial_sigil.collapsed_count} / ${radarContrasts.length} tastes`;
   }
 
   if (data.status === 'complete') {

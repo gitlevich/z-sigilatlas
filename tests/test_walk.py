@@ -542,9 +542,17 @@ class TestTasteSigilEndpoint:
                     "n_presentations": 1,
                     "n_agreements": 1,
                 },
+                "eee": {
+                    "contrast_id": "eee",
+                    "contrast_name": "sem_portrait",
+                    "direction": "right",
+                    "strength": 1.0,
+                    "n_presentations": 1,
+                    "n_agreements": 1,
+                },
             },
-            "collapsed_count": 4,
-            "total_choices": 6,
+            "collapsed_count": 5,
+            "total_choices": 7,
         }
         (sigils_dir / "sigil_default.json").write_text(json.dumps(sigil))
 
@@ -554,12 +562,14 @@ class TestTasteSigilEndpoint:
             resp = await client.get("/api/atlas/taste_sigil?user_id=default")
             assert resp.status == 200
             data = await resp.json()
-            # Only visual bipolars: sharpness + brightness (sem_ and pca_ filtered)
-            assert data["collapsed_count"] == 2
-            assert "aaa" in data["entries"]
-            assert "ddd" in data["entries"]
-            assert "bbb" not in data["entries"], "sem_ should be filtered"
+            # Bipolars included (sharpness, brightness, sem_natural_vs_manmade)
+            # pca_ and unipolar sem_ (no _vs_) excluded
+            assert data["collapsed_count"] == 3
+            assert "aaa" in data["entries"]  # sharpness
+            assert "bbb" in data["entries"]  # sem_natural_vs_manmade (bipolar)
+            assert "ddd" in data["entries"]  # brightness
             assert "ccc" not in data["entries"], "pca_ should be filtered"
+            assert "eee" not in data["entries"], "unipolar sem_ should be filtered"
             assert data["entries"]["aaa"]["name"] == "sharpness"
             assert data["entries"]["aaa"]["dir"] == "left"
             assert data["entries"]["aaa"]["str"] == 0.85
