@@ -2436,8 +2436,9 @@ function draw() {
       if (vis !== undefined) {
         const vs = vis[node.node_id];
         if (vs !== undefined) {
-          // Dim: stronger dimming for low-scoring nodes
-          const dimAlpha = (1.0 - vs) * 0.65;
+          // Gentle dim for low-scoring nodes — subtle enough not to look like
+          // underexposure. Spatial reorder is the primary signal.
+          const dimAlpha = (1.0 - vs) * 0.25;
           if (dimAlpha > 0.01) {
             ctx.fillStyle = `rgba(0,0,0,${dimAlpha.toFixed(3)})`;
             ctx.fillRect(ix, iy, iw, ih);
