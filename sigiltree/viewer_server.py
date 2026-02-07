@@ -1913,12 +1913,13 @@ ATLAS_VIEWER_HTML = r"""<!DOCTYPE html>
     display: flex; gap: 8px; align-items: center;
   }
   #toolbar button {
-    width: 36px; height: 36px; border-radius: 50%;
+    width: 44px; height: 44px; border-radius: 50%;
     background: rgba(30,30,30,0.85); border: 1px solid #444;
-    color: #aaa; font-size: 16px; cursor: pointer;
+    color: #aaa; font-size: 20px; cursor: pointer;
     display: flex; align-items: center; justify-content: center;
     transition: all 0.15s; padding: 0;
   }
+  #toolbar button svg { width: 22px; height: 22px; }
   #toolbar button:hover {
     background: #333; color: #eee; border-color: #4a8;
   }
@@ -1941,11 +1942,10 @@ ATLAS_VIEWER_HTML = r"""<!DOCTYPE html>
 <div id="debug-overlay"></div>
 <div id="flythrough-toast"></div>
 <div id="toolbar">
-  <button id="toolbar-back" title="Back" onclick="exitToParent()" style="opacity:0.3">&#x21A9;</button>
+  <button id="toolbar-back" title="Back one level" onclick="exitToParent()" style="opacity:0.3">&#x21A9;</button>
   <button id="toolbar-home" title="Home" onclick="goHome()" style="opacity:0.3">&#x2302;</button>
-  <button id="toolbar-explore" title="Explore" onclick="toggleFlythrough()">&#x25CE;</button>
-  <button id="toolbar-walk" title="Calibrate" onclick="window.location='/walk'">&#x2261;</button>
-  <button id="toolbar-sigil" title="Sigil overlay" onclick="toggleSigil()">&#x2606;</button>
+  <button id="toolbar-walk" title="Calibrate taste" onclick="window.location='/walk'">&#x2696;</button>
+  <button id="toolbar-sigil" title="Taste overlay" onclick="toggleSigil()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"><ellipse cx="12" cy="12" rx="9" ry="10"/><ellipse cx="12" cy="12" rx="6.5" ry="7.5"/><ellipse cx="12" cy="12" rx="4" ry="5"/><ellipse cx="12" cy="12" rx="1.5" ry="2.5"/></svg></button>
   <button id="toolbar-help" title="Help" onclick="toggleHelp()">?</button>
 </div>
 
@@ -1963,9 +1963,8 @@ ATLAS_VIEWER_HTML = r"""<!DOCTYPE html>
     <span class="section-label">Toolbar</span>
     <div class="key-row"><kbd>&#x21A9;</kbd><span class="key-desc">Back one level</span></div>
     <div class="key-row"><kbd>&#x2302;</kbd><span class="key-desc">Return home</span></div>
-    <div class="key-row"><kbd>&#x25CE;</kbd><span class="key-desc">Auto-explore (flythrough)</span></div>
-    <div class="key-row"><kbd>&#x2261;</kbd><span class="key-desc">Calibrate your taste (left/right walk)</span></div>
-    <div class="key-row"><kbd>&#x2606;</kbd><span class="key-desc">Toggle your taste overlay on/off</span></div>
+    <div class="key-row"><kbd>&#x2696;</kbd><span class="key-desc">Calibrate your taste (left/right walk)</span></div>
+    <div class="key-row"><kbd style="font-size:10px">sigil</kbd><span class="key-desc">Toggle your taste overlay on/off</span></div>
     <div class="dismiss">Click anywhere to begin</div>
   </div>
 </div>
@@ -3386,26 +3385,12 @@ function updateToolbarState() {
   }
 }
 
-async function goHome() {
+function goHome() {
   if (viewStack.length <= 1) return;
-
-  // Animated reverse: pop one level at a time with brief delay
-  const popStep = () => {
-    if (viewStack.length <= 1) {
-      fitOverview();
-      updateBreadcrumb();
-      updateToolbarState();
-      return;
-    }
-    viewStack.pop();
-    fitOverview();
-    updateBreadcrumb();
-    updateToolbarState();
-    if (viewStack.length > 1) {
-      setTimeout(popStep, 300);
-    }
-  };
-  popStep();
+  while (viewStack.length > 1) viewStack.pop();
+  fitOverview();
+  updateBreadcrumb();
+  updateToolbarState();
 }
 
 // ---------------------------------------------------------------------------
