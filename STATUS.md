@@ -1,10 +1,31 @@
 # Sigil Tree - Project Status
 
-## Current Phase: Calibration Walk (Phase 12 feature)
+## Current Phase: Post-Walk housekeeping complete (2026-02-07)
 
-## Session Recovery Context (2026-02-07)
+### What just happened — Dead flythrough code removal
 
-### What just happened — Calibration Walk
+Removed ~880 lines of dead flythrough code across 4 files:
+- `sigiltree/flythrough.py` — stripped to flow-graph functions only (`compute_flow_graph`, `flow_in_direction`, helpers). Removed: `FlythroughSession`, `infer_preferences`, `flythrough_to_sigil`, `_empty_sigil`, `MIN_VISITS`.
+- `sigiltree/viewer_server.py` — removed: flythrough handler, route, app state, CSS, HTML elements, JS globals, 7 JS functions (toggleFlythrough through showFlythroughToast), drawing highlight, debug overlay references, `recordFlythroughVisit()` call in enterNode.
+- `tests/test_flythrough.py` — deleted entirely (454 lines, 39 tests).
+- `tests/test_ride.py` — removed 2 flythrough endpoint tests.
+- All 181 tests pass. Committed `847bcf6`, pushed, deployed.
+
+### Previous — Calibration Walk + UI polish (2026-02-07)
+
+Walk UI:
+- Exit button (top-left) + Escape key to return to atlas
+- Obvious controls: arrow key hints, `[Space]` on skip button, hover highlights whole column
+- Flash animation on mosaic columns confirms choice (250ms blue/orange)
+
+Atlas UI:
+- Toolbar: Back, Home, Calibrate (⚖), Sigil (SVG fingerprint), Help (?)
+- Buttons 44px, icons 20px
+- Help overlay: Esc-dismissable, kept in sync with toolbar changes
+- goHome() is instant (pop all to root)
+- Server port: always 8777 locally
+
+### Previous — Calibration Walk implementation
 
 **Goal**: Resurrect the calibration mechanism as a clean, focused experience. Two image mosaics side by side (extreme low vs extreme high exemplars of a contrast). User picks left, right, or skip. No contrast names shown. Only bipolar contrasts, with PCA as conditional extension. ~17-26 steps, under 2 minutes.
 
@@ -102,11 +123,12 @@
 - Replaced by unified grid: main image is a weighted tile in `layoutAsGrid`.
 
 ### Key files
-- `sigiltree/viewer_server.py` — ALL code (server + HTML/CSS/JS inline, ~2800+ lines)
-- `sigiltree/flythrough.py` — flow graph computation (pure Python, no I/O)
+- `sigiltree/viewer_server.py` — ALL code (server + HTML/CSS/JS inline)
+- `sigiltree/flythrough.py` — flow graph only: `compute_flow_graph`, `flow_in_direction` (pure Python, no I/O)
+- `sigiltree/walk.py` — calibration walk session logic (pure Python)
 - `tests/test_doors.py` — 30 graph behavior tests
-- `tests/test_flythrough.py` — flythrough/calibration tests
-- Server startup: `uv run sigiltree serve artifacts --port 8888`
+- `tests/test_walk.py` — 27 walk tests
+- Server startup: `uv run sigiltree serve artifacts --port 8777`
 - Deploy: `fly deploy` from project root
 
 ### Architecture
@@ -116,7 +138,7 @@
 - Doors endpoint: `GET /api/atlas/node/{id}/doors?level=N&from_node=X&from_level=Y`
 - Tile images: montage composites at higher levels, single images at leaf level
 - Camera locked to viewport, no pan/zoom/scroll, click-only navigation
-- Floating toolbar: Back, Home, Explore, Sigil, Help
+- Floating toolbar: Back, Home, Calibrate, Sigil, Help
 - Justified row layout: `layoutAsGrid()` respects each tile's aspect ratio
 - Contain-fit rendering: `Math.min` scale, full image, no cropping
 
@@ -752,7 +774,7 @@
 - Every node is a sigil with doors. No dead ends. Self-similar at every level.
 - Doors: back (where you came from), down (children), lateral (flow-neighbors)
 - No keyboard navigation. Click-only. Camera locked to 100% viewport.
-- Floating toolbar: Back, Home, Explore, Sigil, Help
+- Floating toolbar: Back, Home, Calibrate, Sigil, Help
 
 ### Files modified
 - `sigiltree/viewer_server.py` — doors endpoint, camera lock, cover-crop tile drawing, server-side caching, cache preheating
