@@ -569,50 +569,6 @@ class TestIntegration:
 
         return tmp_path
 
-    @pytest.mark.asyncio
-    async def test_flythrough_record_endpoint(self, artifact_dir):
-        """POST /api/flythrough/record returns valid response."""
-        from aiohttp.test_utils import TestClient, TestServer
-        from sigiltree.viewer_server import create_app
-
-        app = create_app(artifact_dir)
-        async with TestClient(TestServer(app)) as client:
-            # Not enough visits -> not_ready
-            resp = await client.post("/api/flythrough/record", json={
-                "user_id": "default",
-                "visits": [
-                    {"node_id": "n_000", "level": 0},
-                    {"node_id": "n_001", "level": 0},
-                ],
-            })
-            assert resp.status == 200
-            data = await resp.json()
-            assert data["status"] == "not_ready"
-
-    @pytest.mark.asyncio
-    async def test_flythrough_full_flow(self, artifact_dir):
-        """Visit enough nodes -> preferences recorded."""
-        from aiohttp.test_utils import TestClient, TestServer
-        from sigiltree.viewer_server import create_app
-
-        app = create_app(artifact_dir)
-        async with TestClient(TestServer(app)) as client:
-            # Visit 6 distinct nodes (all high-brightness z-score nodes)
-            visits = [
-                {"node_id": f"n_{i:03d}", "level": 0}
-                for i in range(6)
-            ]
-            resp = await client.post("/api/flythrough/record", json={
-                "user_id": "default",
-                "visits": visits,
-            })
-            assert resp.status == 200
-            data = await resp.json()
-            assert data["status"] == "ok"
-            assert data["visited_count"] == 6
-            assert data["preferences_count"] >= 0
-
-
 class TestDoorsPerformance:
     """Doors endpoint must respond under 200ms at any level."""
 

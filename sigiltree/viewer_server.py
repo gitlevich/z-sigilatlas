@@ -39,7 +39,6 @@ def create_app(artifact_dir: Path) -> web.Application:
     app = web.Application()
     app["artifact_dir"] = artifact_dir
     app["arcade_sessions"] = {}  # user_id -> ArcadeSession
-    app["flythrough_sessions"] = {}  # user_id -> FlythroughSession
     app["walk_sessions"] = {}  # user_id -> WalkSession
     app["_flow_cache"] = {}  # level -> flow_graph
     app["_meta_cache"] = {}  # level -> meta dict
@@ -73,7 +72,6 @@ def create_app(artifact_dir: Path) -> web.Application:
     app.router.add_get("/api/atlas/neighborhood/{node_id}", handle_atlas_neighborhood)
     app.router.add_get("/api/atlas/sigil_scores", handle_atlas_sigil_scores)
     app.router.add_get("/api/ride/stats", handle_ride_stats)  # z-summaries (kept)
-    app.router.add_post("/api/flythrough/record", handle_flythrough_record)
     app.router.add_get("/api/atlas/flow_neighbors", handle_flow_neighbors)
     app.router.add_get("/api/atlas/node/{node_id}/doors", handle_atlas_node_doors)
     app.router.add_get("/api/atlas/node_labels", handle_atlas_node_labels)
@@ -462,64 +460,6 @@ async def handle_atlas_sigil_scores(request: web.Request) -> web.Response:
         "collapsed_contrasts": collapsed_names,
         "level": level,
         "scores": scores,
-    })
-
-
-async def handle_flythrough_record(request: web.Request) -> web.Response:
-    """Record flythrough visits and compute sigil from navigation."""
-    from sigiltree.arcade import save_sigil
-    from sigiltree.ride_stats import load_ride_stats
-    from sigiltree.flythrough import FlythroughSession, flythrough_to_sigil
-
-    artifact_dir = request.app["artifact_dir"]
-    body = await request.json()
-    user_id = body.get("user_id", "default")
-    visits = body.get("visits", [])
-
-    if not visits:
-        return web.json_response({"error": "No visits provided"}, status=400)
-
-    # Build session from visits
-    session = FlythroughSession(user_id=user_id)
-    for v in visits:
-        session.record_visit(v.get("node_id", ""), v.get("level", 0))
-
-    if not session.is_ready:
-        return web.json_response({
-            "status": "not_ready",
-            "visited_count": len(session.distinct_nodes),
-            "preferences_count": 0,
-        })
-
-    # Load z-summaries and contrast library
-    stats = load_ride_stats(artifact_dir)
-    if stats is None:
-        return web.json_response({"error": "Stats not precomputed"}, status=404)
-
-    lib_path = artifact_dir / "contrasts" / "contrast_library.json"
-    if not lib_path.exists():
-        return web.json_response({"error": "No contrast library"}, status=404)
-    library = json.loads(lib_path.read_text())
-
-    # Build all_level_nodes from manifest
-    from sigiltree.atlas import load_atlas_manifest
-    manifest = load_atlas_manifest(artifact_dir)
-    all_level_nodes = {}
-    if manifest:
-        for lvl_info in manifest.get("levels", []):
-            lvl = str(lvl_info["level"])
-            meta_path = artifact_dir / "atlas" / f"level{lvl_info['level']}" / "meta.json"
-            if meta_path.exists():
-                meta = json.loads(meta_path.read_text())
-                all_level_nodes[lvl] = [n["node_id"] for n in meta.get("nodes", [])]
-
-    sigil = flythrough_to_sigil(session, stats["zsummaries"], library, all_level_nodes)
-    save_sigil(sigil, artifact_dir)
-
-    return web.json_response({
-        "status": "ok",
-        "visited_count": len(session.distinct_nodes),
-        "preferences_count": sigil["collapsed_count"],
     })
 
 
@@ -1852,21 +1792,6 @@ ATLAS_VIEWER_HTML = r"""<!DOCTYPE html>
     border: 1px solid rgba(255,170,0,0.3);
   }
   #sigilIndicator.active { display: inline; }
-  #flythroughIndicator {
-    display: none; margin-left: 8px; padding: 2px 8px; border-radius: 3px;
-    font-size: 11px; font-weight: 600;
-    background: rgba(100,200,255,0.15); color: #6cf;
-    border: 1px solid rgba(100,200,255,0.3);
-  }
-  #flythroughIndicator.active { display: inline; }
-  #flythrough-toast {
-    display: none; position: fixed; bottom: 60px; left: 50%;
-    transform: translateX(-50%);
-    background: rgba(20,20,20,0.9); border: 1px solid #2a5; border-radius: 6px;
-    padding: 10px 20px; z-index: 50; font-size: 13px; color: #ddd;
-    transition: opacity 0.5s;
-  }
-  #flythrough-toast.active { display: block; }
   /* Help overlay */
   #help-overlay {
     display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0;
@@ -1934,13 +1859,11 @@ ATLAS_VIEWER_HTML = r"""<!DOCTYPE html>
   <span class="stats" id="stats">Loading...</span>
   <span class="breadcrumb" id="breadcrumb"></span>
   <span id="sigilIndicator">SIGIL</span>
-  <span id="flythroughIndicator">Exploring (0)</span>
   <span class="mode" id="modeLabel">L0</span>
 </div>
 <canvas id="atlas-canvas"></canvas>
 <canvas id="minimap" width="120" height="120"></canvas>
 <div id="debug-overlay"></div>
-<div id="flythrough-toast"></div>
 <div id="toolbar">
   <button id="toolbar-back" title="Back one level" onclick="exitToParent()" style="opacity:0.3">&#x21A9;</button>
   <button id="toolbar-home" title="Home" onclick="goHome()" style="opacity:0.3">&#x2302;</button>
@@ -2052,10 +1975,6 @@ async function fetchNodeLabels(level) {
   } catch (e) { /* labels are optional */ }
 }
 
-// Flythrough (silent calibration) state
-let flythroughActive = false;
-let flythroughVisits = [];   // [{node_id, level, timestamp}]
-const MIN_FLYTHROUGH_VISITS = 5;
 let doorsCache = {};  // {cacheKey: doors[]}
 
 // Animation
@@ -2229,105 +2148,6 @@ function updateSigilIndicator() {
 }
 
 // ---------------------------------------------------------------------------
-// Flythrough: silent calibration via navigation
-// ---------------------------------------------------------------------------
-
-function toggleFlythrough() {
-  if (!flythroughActive) {
-    startFlythrough();
-  } else {
-    finishFlythrough();
-  }
-}
-
-function startFlythrough() {
-  flythroughActive = true;
-  flythroughVisits = [];
-  updateFlythroughIndicator();
-  showFlythroughToast('Exploring. Navigate toward what attracts you.');
-}
-
-async function finishFlythrough() {
-  const distinctCount = new Set(flythroughVisits.map(v => v.node_id)).size;
-  if (distinctCount < MIN_FLYTHROUGH_VISITS) {
-    showFlythroughToast(`Keep exploring (${distinctCount}/${MIN_FLYTHROUGH_VISITS} neighborhoods)`);
-    return;
-  }
-
-  // POST visits to server
-  try {
-    const r = await fetch('/api/flythrough/record', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({user_id: 'default', visits: flythroughVisits}),
-    });
-    if (!r.ok) {
-      showFlythroughToast('Error recording preferences');
-      return;
-    }
-    const data = await r.json();
-
-    flythroughActive = false;
-    flythroughVisits = [];
-    updateFlythroughIndicator();
-
-    // Invalidate sigil caches so G overlay refreshes
-    sigilScores = {};
-    sigilVisual = {};
-
-    if (data.preferences_count > 0) {
-      showFlythroughToast(`${data.preferences_count} preferences recorded. Tap the star to see them.`);
-    } else {
-      showFlythroughToast('No clear preferences detected. Try exploring more distinctly.');
-    }
-  } catch (e) {
-    showFlythroughToast('Error recording preferences');
-  }
-}
-
-function cancelFlythrough() {
-  flythroughActive = false;
-  flythroughVisits = [];
-  updateFlythroughIndicator();
-}
-
-function recordFlythroughVisit(node) {
-  if (!flythroughActive) return;
-  const lastVisit = flythroughVisits[flythroughVisits.length - 1];
-  if (lastVisit && lastVisit.node_id === node.node_id) return;
-  flythroughVisits.push({
-    node_id: node.node_id,
-    level: node.level !== undefined ? node.level : currentLevel(),
-    timestamp: Date.now(),
-  });
-  updateFlythroughIndicator();
-}
-
-function updateFlythroughIndicator() {
-  const el = document.getElementById('flythroughIndicator');
-  const btn = document.getElementById('toolbar-explore');
-  if (flythroughActive) {
-    const count = new Set(flythroughVisits.map(v => v.node_id)).size;
-    el.textContent = `Exploring (${count})`;
-    el.classList.add('active');
-    if (btn) btn.classList.add('active');
-  } else {
-    el.classList.remove('active');
-    if (btn) btn.classList.remove('active');
-  }
-}
-
-function showFlythroughToast(msg) {
-  const el = document.getElementById('flythrough-toast');
-  el.textContent = msg;
-  el.classList.add('active');
-  clearTimeout(el._timeout);
-  el._timeout = setTimeout(() => {
-    el.classList.remove('active');
-  }, 4000);
-}
-
-// ---------------------------------------------------------------------------
 // Tile loading & prefetching
 // ---------------------------------------------------------------------------
 
@@ -2494,13 +2314,6 @@ function draw() {
           }
         }
       }
-    }
-
-    // Flythrough: subtle highlight on visited nodes
-    if (flythroughActive && flythroughVisits.some(v => v.node_id === node.node_id)) {
-      ctx.strokeStyle = 'rgba(100,200,255,0.4)';
-      ctx.lineWidth = Math.max(1, Math.min(3, iw * 0.008));
-      ctx.strokeRect(ix + 1, iy + 1, iw - 2, ih - 2);
     }
 
     // Navigation arrow: pill badge with arrow icon
@@ -2776,8 +2589,6 @@ function drawDebug() {
   html += `<b>Target:</b> x=${camTarget.x.toFixed(0)} y=${camTarget.y.toFixed(0)} z=${camTarget.zoom.toFixed(0)}<br>`;
   html += `<b>Camera locked:</b> yes<br>`;
   html += `<b>Center:</b> (${center.x.toFixed(4)}, ${center.y.toFixed(4)})<br>`;
-  html += `<b>Flythrough:</b> ${flythroughActive ? 'active' : 'off'}<br>`;
-
   if (f.parentNode) {
     const pn = f.parentNode;
     html += `<b>Parent:</b> ${pn.node_id} [${pn.rect.map(v => v.toFixed(3)).join(', ')}]<br>`;
@@ -2812,14 +2623,6 @@ function drawDebug() {
     }
   } else if (sigilActive) {
     html += `<br><b>Sigil:</b> active (hover node for detail)<br>`;
-  }
-
-  // Flythrough debug info
-  if (flythroughActive) {
-    const distinctCount = new Set(flythroughVisits.map(v => v.node_id)).size;
-    html += `<br><b>--- Flythrough ---</b><br>`;
-    html += `<b>Visits:</b> ${flythroughVisits.length} (${distinctCount} distinct)<br>`;
-    html += `<b>Ready:</b> ${distinctCount >= MIN_FLYTHROUGH_VISITS ? 'yes' : 'no'}<br>`;
   }
 
   el.innerHTML = html;
@@ -3011,9 +2814,6 @@ async function enterNode(node) {
     // No children — nowhere deeper to go
     return;
   }
-
-  // Silent calibration: record every node entry
-  recordFlythroughVisit(node);
 
   // Capture current view as snapshot before transitioning
   const snapshot = captureSnapshot();
