@@ -4,13 +4,12 @@ Current state snapshot for session resumption. See [JOURNAL.md](JOURNAL.md) for 
 
 ## Current State (2026-02-07)
 
-Phase 14 complete. Live sigil radar during calibration walk. Deployed, 203 tests pass.
+Phase 15 complete. Calibration walk polish: bigger radar, contrast label. Deployed, 205 tests pass.
 
 ### What's live
 
 - **Atlas viewer** — 5-level treemap of 874 images in 960 nodes. Click to enter, back door to exit. No dead ends.
-- **Calibration walk** (`/walk`) — 17 bipolar contrasts shown as image pairs. Left/right/skip. Produces sigil in ~2 minutes. Live radar chart builds up as you choose.
-
+- **Calibration walk** (`/walk`) — 17 bipolar contrasts shown as image pairs. Left/right/skip. Produces sigil in ~2 minutes. Live radar chart builds up as you choose. Current contrast name displayed at top.
 - **Category filter** (`/categories`) — radar chart with 11 unipolar semantic categories. Multiplicative gate on sigil scores: `final_score = walk_score * category_gate`.
 - **Sigil overlay** — toggle in toolbar. High-scoring nodes brighten + golden halo. Sigil reorder: best nodes gravitate to center and grow.
 - **Live at** https://sigilatlas.fly.dev/ (port 8777 locally)
@@ -43,7 +42,7 @@ Walk-only: gate = 1.0. Categories-only: walk_score = 0.5. Neither: score = 0.5.
 | File | Tests |
 |---|---|
 | `tests/test_categories.py` | 18 (gate computation, combined scoring, persistence) |
-| `tests/test_walk.py` | 31 (walk session, flip, PCA termination, partial sigil) |
+| `tests/test_walk.py` | 33 (walk session, flip, PCA termination, partial sigil, step dict) |
 | `tests/test_doors.py` | 30 (graph behavior, no dead ends) |
 | `tests/test_sigil_scoring.py` | 11 (scoring algorithm) |
 | `tests/test_arcade.py` | 16 (calibration arcade) |
@@ -52,7 +51,7 @@ Walk-only: gate = 1.0. Categories-only: walk_score = 0.5. Neither: score = 0.5.
 | `tests/test_contrasts.py` | 8 (mass scoring, exemplars) |
 | `tests/test_embeddings.py` | 8 (embedding store) |
 | `tests/test_indexer.py` | 11 (corpus ingestion) |
-| **Total** | **203** |
+| **Total** | **205** |
 
 ### Commands
 
