@@ -16,9 +16,12 @@
 
 Sigil Atlas organizes a collection of photographs into a zoomable map based on visual similarity. Images are placed near the ones they most resemble — not by subject or category, but by what they look and feel like.
 
-The tool also lets you measure and record your own visual preferences along specific axes (warm–cool, sharp–soft, simple–complex, and others). The recorded preferences form a **sigil** — a sparse vector that can be projected onto the map as a brightness overlay.
+Two calibration interfaces let you teach the atlas your preferences:
 
-The vocabulary for this comes from **[attention language](https://sigilsnotspells.com)**, a way of describing visual preference precisely enough to compute with.
+- **Taste walk** — binary choices between image pairs along discovered contrast axes
+- **Category filter** — a radar chart for dialing in subject-matter preferences (portrait, landscape, architecture, etc.)
+
+Choices accumulate into a **sigil** — a sparse preference vector projected onto the map as a brightness overlay. The vocabulary comes from **[attention language](https://sigilsnotspells.com)**.
 
 ## How it works
 
@@ -28,23 +31,27 @@ Three kinds of visual similarity are fused together:
 - **Structural** — how things are composed (symmetry, depth, negative space)
 - **Textural** — what surfaces feel like (grain, sharpness, color temperature)
 
-Where all three agree, the groupings are strong. Similar images cluster into neighborhoods; neighborhoods nest into larger regions. The result is a four-level hierarchy you can zoom through.
+Where all three agree, the groupings are strong. Similar images cluster into neighborhoods; neighborhoods nest into larger regions. The result is a five-level hierarchy (960 nodes) you can zoom through.
 
 ## What you can do with it
 
 ### Navigate
 
-Click any neighborhood to zoom in. Press Escape to zoom back out. Pan with WASD or drag. Scroll to zoom. Press H to return to the top. The map layout is fixed — it does not rearrange.
+Click any neighborhood to zoom in. Back arrow or Escape to go up one level. Home button to return to the root. Pan with WASD or drag. Scroll to zoom. The map layout is fixed — it does not rearrange.
 
-### Calibrate
+### Taste walk
 
-Press R to start a **contrast ride**. The system walks you through the atlas along one visual axis and asks which direction you prefer. You choose "more like this," "less like this," or skip. Skipping records nothing.
+The balance-scale toolbar button starts a **taste walk**. Two image mosaics appear side by side — one from each extreme of a contrast axis. Pick left, right, or skip. Skipping records nothing.
 
-### Build a sigil
+### Category filter
 
-Your choices accumulate into a **sigil**. Press G to project it onto the atlas: neighborhoods aligned with your preferences brighten; others dim. The map stays the same; the brightness changes.
+The radar toolbar button opens a **category radar**. Pull handles outward to boost categories you want; leave others at center. The filter is multiplicative — it dims neighborhoods that don't match, without altering walk scores.
 
-Axes you haven't ridden remain in **superposition** — they are not zero, they are unmeasured. The [attention language reference](docs/attention-language.md) explains this distinction and the rest of the vocabulary.
+### Sigil overlay
+
+The fingerprint toolbar button toggles the **taste overlay**. Neighborhoods aligned with your preferences brighten and grow; others dim and shrink. Unmeasured axes remain in **superposition** — not zero, just unmeasured.
+
+The [attention language reference](docs/attention-language.md) explains the vocabulary and mechanics.
 
 ## Why
 
@@ -52,11 +59,9 @@ Photographs have properties that are easy to respond to but hard to talk about. 
 
 Sigil Atlas is an attempt to build both. Preference is recorded only from explicit choices — never inferred from viewing behavior. Unmeasured axes stay unmeasured. Correlated axes are disclosed, not hidden.
 
-**[Read the full attention language reference](docs/attention-language.md)** for the vocabulary, principles, and mechanics.
-
 ## Try it
 
-**[Open the live atlas](https://sigilatlas.fly.dev)** — 250 photographs from San Francisco, organized into 35 neighborhoods across 4 levels.
+**[Open the live atlas](https://sigilatlas.fly.dev)** — 250 photographs from San Francisco, organized into 960 neighborhoods across 5 levels.
 
 ## Run your own
 
@@ -77,7 +82,7 @@ Requires Python 3.11+ and PyTorch for the embedding step. Serving requires only 
 ## Tests
 
 ```bash
-pytest tests/ -v    # 120 tests
+pytest tests/ -v    # 199 tests
 ```
 
 ## Architecture
@@ -85,14 +90,17 @@ pytest tests/ -v    # 120 tests
 ```
 sigiltree/
   indexer.py          Corpus scanner, thumbnails
+  db.py               SQLite catalog
   embeddings.py       CLIP, DINOv2, texture embeddings
   contrasts.py        Contrast discovery and selection
   atlas.py            Fused graph, clustering, treemap pyramid
-  arcade.py           Calibration arcade
+  flythrough.py       Flow graph for lateral navigation
+  arcade.py           Calibration arcade (category radar)
+  walk.py             Binary taste walk (two-tile choices)
+  ride_engine.py      Walk planning with drift policy
+  ride_session.py     Walk state and sigil merging
   ride_stats.py       Precomputed z-summaries and correlations
-  ride_engine.py      Ride planning with drift policy
-  ride_session.py     Ride state and sigil merging
-  sigil_scoring.py    Per-node sigil compatibility
+  sigil_scoring.py    Per-node sigil + category gate scoring
   viewer_server.py    Server and all UI
   cli.py              CLI entry point
 ```

@@ -8,6 +8,7 @@ build/
 
 # Artifacts (large binary data)
 artifacts/
+artifacts_backup_*/
 
 # IDE
 .vscode/
@@ -23,6 +24,9 @@ artifacts/
 images/
 demo_corpus/
 artifacts_full_906/
+
+# Lock files
+uv.lock
 
 # OS
 .DS_Store
