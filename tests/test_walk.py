@@ -484,3 +484,82 @@ class TestStepDict:
         # The contrast_name should match what _contrast_name returns
         expected = session._contrast_name(step.contrast_id)
         assert d["contrast_name"] == expected
+
+
+class TestTasteSigilEndpoint:
+    """Tests for /api/atlas/taste_sigil endpoint."""
+
+    @pytest.mark.asyncio
+    async def test_returns_404_without_sigil(self, tmp_path):
+        from aiohttp.test_utils import TestClient, TestServer
+        from sigiltree.viewer_server import create_app
+
+        (tmp_path / "thumbnails").mkdir()
+        app = create_app(tmp_path)
+        async with TestClient(TestServer(app)) as client:
+            resp = await client.get("/api/atlas/taste_sigil?user_id=default")
+            assert resp.status == 404
+
+    @pytest.mark.asyncio
+    async def test_returns_bipolar_entries_only(self, tmp_path):
+        import json
+        from aiohttp.test_utils import TestClient, TestServer
+        from sigiltree.viewer_server import create_app
+
+        sigils_dir = tmp_path / "sigils"
+        sigils_dir.mkdir()
+        sigil = {
+            "entries": {
+                "aaa": {
+                    "contrast_id": "aaa",
+                    "contrast_name": "sharpness",
+                    "direction": "left",
+                    "strength": 0.85,
+                    "n_presentations": 2,
+                    "n_agreements": 2,
+                },
+                "bbb": {
+                    "contrast_id": "bbb",
+                    "contrast_name": "sem_natural_vs_manmade",
+                    "direction": "right",
+                    "strength": 1.0,
+                    "n_presentations": 1,
+                    "n_agreements": 1,
+                },
+                "ccc": {
+                    "contrast_id": "ccc",
+                    "contrast_name": "pca_clip_0",
+                    "direction": "left",
+                    "strength": 0.7,
+                    "n_presentations": 2,
+                    "n_agreements": 1,
+                },
+                "ddd": {
+                    "contrast_id": "ddd",
+                    "contrast_name": "brightness",
+                    "direction": "right",
+                    "strength": 1.0,
+                    "n_presentations": 1,
+                    "n_agreements": 1,
+                },
+            },
+            "collapsed_count": 4,
+            "total_choices": 6,
+        }
+        (sigils_dir / "sigil_default.json").write_text(json.dumps(sigil))
+
+        (tmp_path / "thumbnails").mkdir()
+        app = create_app(tmp_path)
+        async with TestClient(TestServer(app)) as client:
+            resp = await client.get("/api/atlas/taste_sigil?user_id=default")
+            assert resp.status == 200
+            data = await resp.json()
+            # Only visual bipolars: sharpness + brightness (sem_ and pca_ filtered)
+            assert data["collapsed_count"] == 2
+            assert "aaa" in data["entries"]
+            assert "ddd" in data["entries"]
+            assert "bbb" not in data["entries"], "sem_ should be filtered"
+            assert "ccc" not in data["entries"], "pca_ should be filtered"
+            assert data["entries"]["aaa"]["name"] == "sharpness"
+            assert data["entries"]["aaa"]["dir"] == "left"
+            assert data["entries"]["aaa"]["str"] == 0.85

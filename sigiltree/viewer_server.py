@@ -74,6 +74,7 @@ def create_app(artifact_dir: Path) -> web.Application:
     app.router.add_get("/api/atlas/node/{node_id}/children", handle_atlas_node_children)
     app.router.add_get("/api/atlas/neighborhood/{node_id}", handle_atlas_neighborhood)
     app.router.add_get("/api/atlas/sigil_scores", handle_atlas_sigil_scores)
+    app.router.add_get("/api/atlas/taste_sigil", handle_atlas_taste_sigil)
     app.router.add_get("/api/ride/stats", handle_ride_stats)  # z-summaries (kept)
     app.router.add_get("/api/atlas/flow_neighbors", handle_flow_neighbors)
     app.router.add_get("/api/atlas/node/{node_id}/doors", handle_atlas_node_doors)
@@ -560,6 +561,36 @@ async def handle_atlas_sigil_scores(request: web.Request) -> web.Response:
         "collapsed_contrasts": collapsed_names,
         "level": level,
         "scores": scores,
+    })
+
+
+async def handle_atlas_taste_sigil(request: web.Request) -> web.Response:
+    """Return the user's taste sigil entries for radar display."""
+    from sigiltree.arcade import load_sigil
+
+    artifact_dir = request.app["artifact_dir"]
+    user_id = request.query.get("user_id", "default")
+
+    sigil = load_sigil(artifact_dir, user_id)
+    if sigil is None:
+        return web.json_response({"error": "No sigil found"}, status=404)
+
+    # Only include named visual bipolar contrasts (not sem_ categories or pca_ emergent)
+    entries = {
+        cid: {
+            "name": e["contrast_name"],
+            "dir": e["direction"],
+            "str": e["strength"],
+        }
+        for cid, e in sigil.get("entries", {}).items()
+        if not e["contrast_name"].startswith("sem_")
+        and not e["contrast_name"].startswith("pca_")
+    }
+
+    return web.json_response({
+        "entries": entries,
+        "collapsed_count": len(entries),
+        "total_choices": sigil.get("total_choices", 0),
     })
 
 
@@ -2556,6 +2587,25 @@ ATLAS_VIEWER_HTML = r"""<!DOCTYPE html>
   #toolbar button.active {
     background: rgba(100,200,255,0.15); border-color: #6cf; color: #6cf;
   }
+  #toolbar-taste { display: none; }
+  #toolbar-taste.available { display: flex; }
+  /* Taste sigil radar panel */
+  #taste-radar-panel {
+    position: fixed; bottom: 72px; left: 16px; z-index: 20;
+    width: 240px; background: rgba(17,17,17,0.95);
+    border-radius: 10px; border: 1px solid #333;
+    padding: 12px 8px 8px; text-align: center;
+    opacity: 0; pointer-events: none;
+    transition: opacity 0.3s ease;
+  }
+  #taste-radar-panel.visible { opacity: 1; pointer-events: auto; }
+  #taste-radar-panel .panel-title {
+    font-size: 11px; color: #888; letter-spacing: 0.5px;
+    margin-bottom: 6px; text-transform: uppercase;
+  }
+  #taste-radar-panel .panel-count {
+    font-size: 10px; color: #666; margin-top: 4px;
+  }
 </style>
 </head>
 <body>
@@ -2575,7 +2625,13 @@ ATLAS_VIEWER_HTML = r"""<!DOCTYPE html>
   <button id="toolbar-walk" title="Calibrate taste" onclick="window.location='/walk'">&#x2696;</button>
   <button id="toolbar-categories" title="Category filter" onclick="window.location='/categories'"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"><polygon points="12,2 22,9 19,20 5,20 2,9" fill="none"/><polygon points="12,8 17,11 15,17 9,17 7,11" fill="none"/><circle cx="12" cy="12" r="1.5" fill="currentColor" stroke="none"/></svg></button>
   <button id="toolbar-sigil" title="Taste overlay" onclick="toggleSigil()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"><ellipse cx="12" cy="12" rx="9" ry="10"/><ellipse cx="12" cy="12" rx="6.5" ry="7.5"/><ellipse cx="12" cy="12" rx="4" ry="5"/><ellipse cx="12" cy="12" rx="1.5" ry="2.5"/></svg></button>
+  <button id="toolbar-taste" title="My taste profile" onclick="toggleTasteRadar()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"><polygon points="12,3 20,8 20,16 12,21 4,16 4,8" stroke-dasharray="2,1" opacity="0.4"/><polygon points="12,6 17,9.5 17,14.5 12,18 7,14.5 7,9.5" opacity="0.6"/><line x1="12" y1="3" x2="12" y2="21" opacity="0.3"/><line x1="4" y1="8" x2="20" y2="16" opacity="0.3"/><line x1="20" y1="8" x2="4" y2="16" opacity="0.3"/><circle cx="12" cy="3" r="1.5" fill="currentColor" stroke="none"/><circle cx="17" cy="9.5" r="1.5" fill="currentColor" stroke="none"/><circle cx="14" cy="16" r="1.5" fill="currentColor" stroke="none"/><circle cx="7" cy="14.5" r="1.5" fill="currentColor" stroke="none"/></svg></button>
   <button id="toolbar-help" title="Help" onclick="toggleHelp()">?</button>
+</div>
+<div id="taste-radar-panel">
+  <div class="panel-title">taste profile</div>
+  <canvas id="taste-radar-canvas" width="220" height="220"></canvas>
+  <div class="panel-count" id="taste-radar-count"></div>
 </div>
 
 <div id="help-overlay">
@@ -4151,12 +4207,154 @@ if (!sessionStorage.getItem('sigilatlas_help_seen')) {
 }
 
 // ---------------------------------------------------------------------------
+// Taste sigil radar panel
+// ---------------------------------------------------------------------------
+let tasteRadarVisible = false;
+let tasteRadarData = null;  // {entries: {cid: {name, dir, str}}, collapsed_count}
+
+const TASTE_RADAR_SIZE = 220;
+const TASTE_RADAR_PAD = 36;
+const TASTE_RADAR_LABEL_PAD = 16;
+
+function tasteRadarEndpoint(cx, cy, r, i, n) {
+  const angle = -Math.PI / 2 + (2 * Math.PI * i) / n;
+  return [cx + r * Math.cos(angle), cy + r * Math.sin(angle)];
+}
+
+function tasteRadarVal(entry) {
+  // Direction encodes which pole the user preferred.
+  // Right = outward (0.5 .. 1.0), Left = inward (0.0 .. 0.5).
+  // This makes the shape asymmetric — right-leaning contrasts bulge out,
+  // left-leaning ones pull in.
+  if (entry.dir === 'right') return 0.5 + entry.str * 0.5;
+  return 0.5 - entry.str * 0.5;
+}
+
+function drawTasteRadar() {
+  const canvas = document.getElementById('taste-radar-canvas');
+  if (!canvas) return;
+  const ctx = canvas.getContext('2d');
+  if (!tasteRadarData || !tasteRadarData.entries) return;
+
+  const entries = Object.values(tasteRadarData.entries);
+  const n = entries.length;
+  if (n === 0) return;
+
+  // Stable alphabetical order (not sorted by strength — shape should be recognizable)
+  entries.sort((a, b) => a.name.localeCompare(b.name));
+
+  const cx = TASTE_RADAR_SIZE / 2;
+  const cy = TASTE_RADAR_SIZE / 2;
+  const r = cx - TASTE_RADAR_PAD;
+
+  ctx.clearRect(0, 0, TASTE_RADAR_SIZE, TASTE_RADAR_SIZE);
+
+  // Guide rings: midline (0.5) is the neutral boundary
+  for (const frac of [0.5, 1.0]) {
+    ctx.beginPath();
+    for (let i = 0; i <= n; i++) {
+      const [x, y] = tasteRadarEndpoint(cx, cy, r * frac, i, n);
+      if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    }
+    ctx.closePath();
+    ctx.strokeStyle = frac === 1.0 ? '#383838' : '#444';
+    ctx.lineWidth = frac === 0.5 ? 1.0 : 0.75;
+    if (frac === 0.5) ctx.setLineDash([3, 3]);
+    ctx.stroke();
+    ctx.setLineDash([]);
+  }
+
+  // Axis lines
+  for (let i = 0; i < n; i++) {
+    const [ex, ey] = tasteRadarEndpoint(cx, cy, r, i, n);
+    ctx.beginPath();
+    ctx.moveTo(cx, cy);
+    ctx.lineTo(ex, ey);
+    ctx.strokeStyle = 'rgba(255,255,255,0.10)';
+    ctx.lineWidth = 0.75;
+    ctx.stroke();
+  }
+
+  // Filled polygon using signed radial values
+  ctx.beginPath();
+  for (let i = 0; i < n; i++) {
+    const val = tasteRadarVal(entries[i]);
+    const [x, y] = tasteRadarEndpoint(cx, cy, r * val, i, n);
+    if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+  }
+  ctx.closePath();
+  ctx.fillStyle = 'rgba(140,180,220,0.12)';
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(140,180,220,0.45)';
+  ctx.lineWidth = 1.5;
+  ctx.stroke();
+
+  // Dots + labels
+  ctx.font = '9px system-ui, sans-serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  for (let i = 0; i < n; i++) {
+    const e = entries[i];
+    const val = tasteRadarVal(e);
+    const [hx, hy] = tasteRadarEndpoint(cx, cy, r * val, i, n);
+    ctx.beginPath();
+    ctx.arc(hx, hy, 3.5, 0, Math.PI * 2);
+    ctx.fillStyle = e.dir === 'right' ? '#ffa800' : '#68a8ff';
+    ctx.fill();
+    // Label at the outer rim, always readable
+    const [lx, ly] = tasteRadarEndpoint(cx, cy, r + TASTE_RADAR_LABEL_PAD, i, n);
+    ctx.fillStyle = e.dir === 'right' ? 'rgba(255,168,0,0.8)' : 'rgba(104,168,255,0.8)';
+    const label = e.name.replace(/_/g, ' ');
+    const arrow = e.dir === 'right' ? ' +' : ' -';
+    ctx.fillText(label + arrow, lx, ly);
+  }
+}
+
+async function fetchTasteSigil() {
+  try {
+    const r = await fetch('/api/atlas/taste_sigil?user_id=default');
+    if (!r.ok) return false;
+    tasteRadarData = await r.json();
+    return true;
+  } catch (e) {
+    return false;
+  }
+}
+
+async function checkTasteSigilExists() {
+  const exists = await fetchTasteSigil();
+  const btn = document.getElementById('toolbar-taste');
+  if (exists && btn) {
+    btn.classList.add('available');
+  }
+}
+
+function toggleTasteRadar() {
+  tasteRadarVisible = !tasteRadarVisible;
+  const panel = document.getElementById('taste-radar-panel');
+  const btn = document.getElementById('toolbar-taste');
+  if (tasteRadarVisible) {
+    if (tasteRadarData) {
+      drawTasteRadar();
+      const countEl = document.getElementById('taste-radar-count');
+      countEl.textContent = `${tasteRadarData.collapsed_count} calibrated tastes`;
+    }
+    panel.classList.add('visible');
+    if (btn) btn.classList.add('active');
+  } else {
+    panel.classList.remove('visible');
+    if (btn) btn.classList.remove('active');
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Init
 // ---------------------------------------------------------------------------
 
 window.addEventListener('resize', resize);
 resize();
 init();
+checkTasteSigilExists();
 </script>
 </body>
 </html>
