@@ -82,7 +82,7 @@ Requires Python 3.11+ and PyTorch for the embedding step. Serving requires only 
 ## Tests
 
 ```bash
-pytest tests/ -v    # 199 tests
+pytest tests/ -v    # 203 tests
 ```
 
 ## Architecture
