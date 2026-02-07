@@ -64,6 +64,9 @@ def create_app(artifact_dir: Path) -> web.Application:
     app.router.add_post("/api/walk/start", handle_walk_start)
     app.router.add_post("/api/walk/choose", handle_walk_choose)
     app.router.add_get("/api/sigil", handle_sigil_api)
+    app.router.add_get("/categories", handle_categories_page)
+    app.router.add_get("/api/categories/data", handle_categories_data)
+    app.router.add_post("/api/categories/save", handle_categories_save)
     app.router.add_get("/atlas", handle_atlas_page)
     app.router.add_get("/api/atlas/meta", handle_atlas_meta)
     app.router.add_get("/api/atlas/manifest", handle_atlas_manifest)
@@ -320,6 +323,73 @@ async def handle_walk_choose(request: web.Request) -> web.Response:
     return web.json_response(result)
 
 
+async def handle_categories_page(request: web.Request) -> web.Response:
+    return web.Response(text=CATEGORIES_HTML, content_type="text/html")
+
+
+async def handle_categories_data(request: web.Request) -> web.Response:
+    from sigiltree.walk import classify_contrast
+    from sigiltree.arcade import load_category_prefs
+
+    artifact_dir = request.app["artifact_dir"]
+    lib_path = artifact_dir / "contrasts" / "contrast_library.json"
+    if not lib_path.exists():
+        return web.json_response({"error": "No contrast library found"}, status=404)
+
+    library = json.loads(lib_path.read_text())
+    user_id = request.query.get("user_id", "default")
+
+    categories = []
+    for c in library["contrasts"]:
+        if classify_contrast(c["name"]) == "unipolar":
+            categories.append({
+                "contrast_id": c["contrast_id"],
+                "contrast_name": c["name"],
+                "display_name": c["name"].replace("sem_", "").replace("_", " "),
+                "exemplar_ids": c["exemplars"]["high"][:6],
+            })
+
+    # Load existing prefs for pre-fill
+    prefs = load_category_prefs(artifact_dir, user_id)
+    existing_weights = prefs.get("weights", {}) if prefs else {}
+
+    return web.json_response({
+        "categories": categories,
+        "existing_weights": existing_weights,
+    })
+
+
+async def handle_categories_save(request: web.Request) -> web.Response:
+    import time as _time
+    from sigiltree.arcade import save_category_prefs
+
+    body = await request.json()
+    user_id = body.get("user_id", "default")
+    weights = body.get("weights", {})
+
+    # Clamp to [0, 1]
+    clamped = {
+        cid: max(0.0, min(1.0, float(val)))
+        for cid, val in weights.items()
+    }
+
+    prefs = {
+        "user_id": user_id,
+        "version": "categories_v1",
+        "created_at": _time.time(),
+        "weights": clamped,
+    }
+
+    artifact_dir = request.app["artifact_dir"]
+    save_category_prefs(prefs, artifact_dir)
+
+    active_count = sum(1 for v in clamped.values() if v > 0.01)
+    return web.json_response({
+        "status": "saved",
+        "active_categories": active_count,
+    })
+
+
 async def handle_atlas_page(request: web.Request) -> web.Response:
     return web.Response(text=ATLAS_VIEWER_HTML, content_type="text/html")
 
@@ -424,7 +494,7 @@ async def handle_atlas_neighborhood(request: web.Request) -> web.Response:
 
 
 async def handle_atlas_sigil_scores(request: web.Request) -> web.Response:
-    from sigiltree.arcade import load_sigil
+    from sigiltree.arcade import load_sigil, load_category_prefs
     from sigiltree.atlas import load_atlas_meta
     from sigiltree.sigil_scoring import compute_sigil_scores
 
@@ -450,7 +520,14 @@ async def handle_atlas_sigil_scores(request: web.Request) -> web.Response:
     if meta is None:
         return web.json_response({"error": f"No atlas level {level}"}, status=404)
 
-    scores = compute_sigil_scores(sigil, library, coordinates, meta["nodes"])
+    # Load category preferences for multiplicative gate
+    cat_prefs = load_category_prefs(artifact_dir, user_id)
+    cat_weights = cat_prefs.get("weights", {}) if cat_prefs else None
+
+    scores = compute_sigil_scores(
+        sigil, library, coordinates, meta["nodes"],
+        category_weights=cat_weights,
+    )
 
     collapsed_names = [e["contrast_name"] for e in sigil.get("entries", {}).values()]
 
@@ -1741,6 +1818,409 @@ startWalk();
 </html>
 """
 
+CATEGORIES_HTML = r"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Category Filter</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+  background: #111; color: #ccc; font-family: system-ui, sans-serif;
+  min-height: 100vh; display: flex; flex-direction: column;
+  align-items: center; user-select: none; -webkit-user-select: none;
+}
+.exit-btn {
+  position: fixed; top: 12px; left: 16px; z-index: 50;
+  background: none; border: 1px solid #444; color: #888;
+  font-size: 13px; padding: 6px 14px; border-radius: 14px;
+  cursor: pointer; transition: color 0.15s, border-color 0.15s;
+}
+.exit-btn:hover { color: #ccc; border-color: #888; }
+.exit-btn .hint { font-size: 11px; color: #555; margin-left: 6px; }
+h1 { margin: 60px 0 6px; font-size: 22px; font-weight: 300; color: #ddd; }
+.subtitle { font-size: 13px; color: #666; margin-bottom: 24px; }
+.radar-container {
+  position: relative; width: min(80vw, 520px); height: min(80vw, 520px);
+}
+#radar-canvas {
+  width: 100%; height: 100%; cursor: crosshair;
+}
+.exemplar-panel {
+  margin-top: 16px; text-align: center; min-height: 120px;
+}
+.exemplar-label {
+  font-size: 14px; color: #888; margin-bottom: 8px;
+  text-transform: capitalize; letter-spacing: 0.5px;
+}
+.exemplar-grid {
+  display: inline-grid; grid-template-columns: repeat(3, 1fr);
+  gap: 3px; max-width: 320px;
+}
+.exemplar-grid img {
+  width: 100px; height: 100px; object-fit: cover;
+  border-radius: 3px; background: #1a1a1a;
+}
+.save-zone { margin: 20px 0 40px; }
+.save-btn {
+  background: rgba(70, 170, 120, 0.15); border: 1px solid #4a8;
+  color: #4a8; font-size: 15px; padding: 12px 40px;
+  border-radius: 22px; cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+.save-btn:hover { background: rgba(70, 170, 120, 0.3); color: #6c6; }
+.save-btn:disabled {
+  opacity: 0.3; cursor: default; background: transparent;
+}
+.done-overlay {
+  position: fixed; inset: 0; background: rgba(17,17,17,0.95);
+  display: flex; align-items: center; justify-content: center;
+  flex-direction: column; gap: 12px; z-index: 100;
+  opacity: 0; transition: opacity 0.4s; pointer-events: none;
+}
+.done-overlay.visible { opacity: 1; pointer-events: auto; }
+.done-msg { font-size: 24px; color: #ccc; font-weight: 300; }
+.done-detail { font-size: 14px; color: #666; }
+</style>
+</head>
+<body>
+
+<button class="exit-btn" onclick="window.location='/atlas'">exit <span class="hint">[Esc]</span></button>
+<h1>Category Filter</h1>
+<p class="subtitle">Pull handles outward to include categories. Center = hidden.</p>
+
+<div class="radar-container">
+  <canvas id="radar-canvas"></canvas>
+</div>
+
+<div class="exemplar-panel">
+  <div class="exemplar-label" id="exemplar-label"></div>
+  <div class="exemplar-grid" id="exemplar-grid"></div>
+</div>
+
+<div class="save-zone">
+  <button class="save-btn" id="save-btn" onclick="saveCategories()">Save</button>
+</div>
+
+<div id="done-overlay" class="done-overlay">
+  <div class="done-msg" id="done-msg">Preferences saved.</div>
+  <div class="done-detail" id="done-detail">Returning to atlas...</div>
+</div>
+
+<script>
+let categories = [];
+let weights = {};        // {contrast_id: float [0,1]}
+let hoveredAxis = -1;
+let dragging = false;
+let dragAxis = -1;
+
+const canvas = document.getElementById('radar-canvas');
+const ctx = canvas.getContext('2d');
+
+// Radar geometry
+const PADDING = 60;
+let centerX, centerY, radius;
+
+function resizeCanvas() {
+  const rect = canvas.parentElement.getBoundingClientRect();
+  const dpr = window.devicePixelRatio || 1;
+  canvas.width = rect.width * dpr;
+  canvas.height = rect.height * dpr;
+  canvas.style.width = rect.width + 'px';
+  canvas.style.height = rect.height + 'px';
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  centerX = rect.width / 2;
+  centerY = rect.height / 2;
+  radius = Math.min(centerX, centerY) - PADDING;
+  drawRadar();
+}
+
+function axisAngle(i) {
+  // Start from top (-PI/2), go clockwise
+  return -Math.PI / 2 + (2 * Math.PI * i) / categories.length;
+}
+
+function axisEndpoint(i, r) {
+  const a = axisAngle(i);
+  return [centerX + Math.cos(a) * r, centerY + Math.sin(a) * r];
+}
+
+function drawRadar() {
+  const w = canvas.width / (window.devicePixelRatio || 1);
+  const h = canvas.height / (window.devicePixelRatio || 1);
+  ctx.clearRect(0, 0, w, h);
+
+  if (categories.length === 0) return;
+  const n = categories.length;
+
+  // Guide rings
+  for (const frac of [0.33, 0.66, 1.0]) {
+    ctx.beginPath();
+    for (let i = 0; i <= n; i++) {
+      const [x, y] = axisEndpoint(i % n, radius * frac);
+      if (i === 0) ctx.moveTo(x, y);
+      else ctx.lineTo(x, y);
+    }
+    ctx.closePath();
+    ctx.strokeStyle = frac === 1.0 ? '#333' : '#222';
+    ctx.lineWidth = 1;
+    ctx.stroke();
+  }
+
+  // Axes
+  for (let i = 0; i < n; i++) {
+    const [ex, ey] = axisEndpoint(i, radius);
+    ctx.beginPath();
+    ctx.moveTo(centerX, centerY);
+    ctx.lineTo(ex, ey);
+    ctx.strokeStyle = i === hoveredAxis ? '#666' : '#2a2a2a';
+    ctx.lineWidth = 1;
+    ctx.stroke();
+  }
+
+  // Filled polygon
+  ctx.beginPath();
+  for (let i = 0; i < n; i++) {
+    const val = weights[categories[i].contrast_id] || 0;
+    const [x, y] = axisEndpoint(i, radius * val);
+    if (i === 0) ctx.moveTo(x, y);
+    else ctx.lineTo(x, y);
+  }
+  ctx.closePath();
+  ctx.fillStyle = 'rgba(70, 170, 120, 0.12)';
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(70, 170, 120, 0.5)';
+  ctx.lineWidth = 1.5;
+  ctx.stroke();
+
+  // Handles (dots on axes)
+  for (let i = 0; i < n; i++) {
+    const val = weights[categories[i].contrast_id] || 0;
+    const [hx, hy] = axisEndpoint(i, radius * val);
+    ctx.beginPath();
+    ctx.arc(hx, hy, i === hoveredAxis ? 7 : 5, 0, Math.PI * 2);
+    ctx.fillStyle = val > 0.01 ? '#4a8' : '#444';
+    ctx.fill();
+    if (i === hoveredAxis) {
+      ctx.strokeStyle = '#6c6';
+      ctx.lineWidth = 2;
+      ctx.stroke();
+    }
+  }
+
+  // Labels
+  ctx.font = '12px system-ui, sans-serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  for (let i = 0; i < n; i++) {
+    const [lx, ly] = axisEndpoint(i, radius + 30);
+    const val = weights[categories[i].contrast_id] || 0;
+    ctx.fillStyle = i === hoveredAxis ? '#ccc' : (val > 0.01 ? '#999' : '#555');
+    ctx.fillText(categories[i].display_name, lx, ly);
+    if (val > 0.01) {
+      ctx.fillStyle = '#4a8';
+      ctx.font = '10px system-ui, sans-serif';
+      ctx.fillText(Math.round(val * 100) + '%', lx, ly + 14);
+      ctx.font = '12px system-ui, sans-serif';
+    }
+  }
+}
+
+function findClosestAxis(mx, my) {
+  if (categories.length === 0) return -1;
+  let best = -1, bestDist = 30;  // 30px threshold
+  for (let i = 0; i < categories.length; i++) {
+    const val = weights[categories[i].contrast_id] || 0;
+    const [hx, hy] = axisEndpoint(i, radius * val);
+    const d = Math.hypot(mx - hx, my - hy);
+    if (d < bestDist) { bestDist = d; best = i; }
+  }
+  // Also check proximity to axis line (not just handle)
+  if (best === -1) {
+    for (let i = 0; i < categories.length; i++) {
+      const [ex, ey] = axisEndpoint(i, radius);
+      // Project mouse onto axis line
+      const dx = ex - centerX, dy = ey - centerY;
+      const len = Math.hypot(dx, dy);
+      const nx = dx / len, ny = dy / len;
+      const pmx = mx - centerX, pmy = my - centerY;
+      const proj = pmx * nx + pmy * ny;
+      if (proj < 0) continue;
+      const perpDist = Math.abs(pmx * ny - pmy * nx);
+      if (perpDist < 20 && proj < radius + 20) {
+        best = i;
+        break;
+      }
+    }
+  }
+  return best;
+}
+
+function projectOnAxis(mx, my, axisIdx) {
+  const a = axisAngle(axisIdx);
+  const dx = Math.cos(a), dy = Math.sin(a);
+  const pmx = mx - centerX, pmy = my - centerY;
+  const proj = pmx * dx + pmy * dy;
+  return Math.max(0, Math.min(1, proj / radius));
+}
+
+// Mouse events
+canvas.addEventListener('mousemove', e => {
+  const rect = canvas.getBoundingClientRect();
+  const mx = e.clientX - rect.left;
+  const my = e.clientY - rect.top;
+
+  if (dragging && dragAxis >= 0) {
+    const val = projectOnAxis(mx, my, dragAxis);
+    weights[categories[dragAxis].contrast_id] = val;
+    drawRadar();
+    return;
+  }
+
+  const prev = hoveredAxis;
+  hoveredAxis = findClosestAxis(mx, my);
+  if (hoveredAxis !== prev) {
+    drawRadar();
+    showExemplars(hoveredAxis);
+  }
+});
+
+canvas.addEventListener('mousedown', e => {
+  const rect = canvas.getBoundingClientRect();
+  const mx = e.clientX - rect.left;
+  const my = e.clientY - rect.top;
+  const axis = findClosestAxis(mx, my);
+  if (axis >= 0) {
+    dragging = true;
+    dragAxis = axis;
+    hoveredAxis = axis;
+    const val = projectOnAxis(mx, my, axis);
+    weights[categories[axis].contrast_id] = val;
+    drawRadar();
+    showExemplars(axis);
+  }
+});
+
+canvas.addEventListener('mouseup', () => {
+  dragging = false;
+  dragAxis = -1;
+});
+
+canvas.addEventListener('mouseleave', () => {
+  dragging = false;
+  dragAxis = -1;
+});
+
+canvas.addEventListener('dblclick', e => {
+  const rect = canvas.getBoundingClientRect();
+  const mx = e.clientX - rect.left;
+  const my = e.clientY - rect.top;
+  const axis = findClosestAxis(mx, my);
+  if (axis >= 0) {
+    weights[categories[axis].contrast_id] = 0;
+    drawRadar();
+  }
+});
+
+// Touch events
+canvas.addEventListener('touchstart', e => {
+  e.preventDefault();
+  const rect = canvas.getBoundingClientRect();
+  const t = e.touches[0];
+  const mx = t.clientX - rect.left;
+  const my = t.clientY - rect.top;
+  const axis = findClosestAxis(mx, my);
+  if (axis >= 0) {
+    dragging = true;
+    dragAxis = axis;
+    hoveredAxis = axis;
+    const val = projectOnAxis(mx, my, axis);
+    weights[categories[axis].contrast_id] = val;
+    drawRadar();
+    showExemplars(axis);
+  }
+}, {passive: false});
+
+canvas.addEventListener('touchmove', e => {
+  e.preventDefault();
+  if (!dragging || dragAxis < 0) return;
+  const rect = canvas.getBoundingClientRect();
+  const t = e.touches[0];
+  const mx = t.clientX - rect.left;
+  const my = t.clientY - rect.top;
+  const val = projectOnAxis(mx, my, dragAxis);
+  weights[categories[dragAxis].contrast_id] = val;
+  drawRadar();
+}, {passive: false});
+
+canvas.addEventListener('touchend', () => {
+  dragging = false;
+  dragAxis = -1;
+});
+
+function showExemplars(axisIdx) {
+  const label = document.getElementById('exemplar-label');
+  const grid = document.getElementById('exemplar-grid');
+  if (axisIdx < 0 || axisIdx >= categories.length) {
+    label.textContent = '';
+    grid.innerHTML = '';
+    return;
+  }
+  const cat = categories[axisIdx];
+  label.textContent = cat.display_name;
+  grid.innerHTML = '';
+  for (const id of cat.exemplar_ids) {
+    const img = document.createElement('img');
+    img.src = '/thumbs/256/' + id + '.jpg';
+    img.alt = '';
+    img.draggable = false;
+    grid.appendChild(img);
+  }
+}
+
+async function loadCategories() {
+  const r = await fetch('/api/categories/data?user_id=default');
+  const data = await r.json();
+  categories = data.categories;
+  // Pre-fill from saved weights
+  for (const [cid, val] of Object.entries(data.existing_weights || {})) {
+    weights[cid] = val;
+  }
+  resizeCanvas();
+}
+
+async function saveCategories() {
+  const r = await fetch('/api/categories/save', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({user_id: 'default', weights}),
+  });
+  const data = await r.json();
+  if (data.status === 'saved') {
+    const overlay = document.getElementById('done-overlay');
+    const n = data.active_categories || 0;
+    document.getElementById('done-msg').textContent = 'Category filter saved.';
+    document.getElementById('done-detail').textContent =
+      n > 0
+        ? n + ' categor' + (n > 1 ? 'ies' : 'y') + ' active. Returning to atlas...'
+        : 'All categories cleared. Returning to atlas...';
+    overlay.classList.add('visible');
+    setTimeout(() => { window.location = '/atlas?sigil=1'; }, 1500);
+  }
+}
+
+window.addEventListener('resize', resizeCanvas);
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape') window.location = '/atlas';
+});
+
+loadCategories();
+</script>
+</body>
+</html>
+"""
+
 ATLAS_VIEWER_HTML = r"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -1868,6 +2348,7 @@ ATLAS_VIEWER_HTML = r"""<!DOCTYPE html>
   <button id="toolbar-back" title="Back one level" onclick="exitToParent()" style="opacity:0.3">&#x21A9;</button>
   <button id="toolbar-home" title="Home" onclick="goHome()" style="opacity:0.3">&#x2302;</button>
   <button id="toolbar-walk" title="Calibrate taste" onclick="window.location='/walk'">&#x2696;</button>
+  <button id="toolbar-categories" title="Category filter" onclick="window.location='/categories'"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"><polygon points="12,2 22,9 19,20 5,20 2,9" fill="none"/><polygon points="12,8 17,11 15,17 9,17 7,11" fill="none"/><circle cx="12" cy="12" r="1.5" fill="currentColor" stroke="none"/></svg></button>
   <button id="toolbar-sigil" title="Taste overlay" onclick="toggleSigil()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"><ellipse cx="12" cy="12" rx="9" ry="10"/><ellipse cx="12" cy="12" rx="6.5" ry="7.5"/><ellipse cx="12" cy="12" rx="4" ry="5"/><ellipse cx="12" cy="12" rx="1.5" ry="2.5"/></svg></button>
   <button id="toolbar-help" title="Help" onclick="toggleHelp()">?</button>
 </div>
@@ -1886,6 +2367,7 @@ ATLAS_VIEWER_HTML = r"""<!DOCTYPE html>
     <div class="key-row"><kbd>&#x21A9;</kbd><span class="key-desc">Back one level</span></div>
     <div class="key-row"><kbd>&#x2302;</kbd><span class="key-desc">Return home</span></div>
     <div class="key-row"><kbd>&#x2696;</kbd><span class="key-desc">Calibrate your taste (left/right walk)</span></div>
+    <div class="key-row"><kbd style="font-size:10px">radar</kbd><span class="key-desc">Category filter (portrait, landscape, etc.)</span></div>
     <div class="key-row"><kbd style="font-size:10px">sigil</kbd><span class="key-desc">Toggle your taste overlay on/off</span></div>
     <div class="dismiss">Click anywhere to begin</div>
   </div>

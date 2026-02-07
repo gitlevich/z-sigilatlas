@@ -1,8 +1,33 @@
 # Sigil Tree - Project Status
 
-## Current Phase: Phase 12 — Sigil-driven atlas reordering (COMPLETE, 2026-02-07)
+## Current Phase: Phase 13 — Categorical Calibration (COMPLETE, 2026-02-07)
 
-### What just happened — Sigil reorder implementation
+### What just happened — Radar-based category filter
+
+Branch `phase13-category-radar`. The 11 unipolar semantic categories (portrait, landscape, architecture,
+etc.) that the binary walk excludes now have a radar chart UI for direct preference setting.
+
+**Scoring model:** Categories act as a multiplicative gate on sigil scores.
+`final_score = walk_score * category_gate`. Walk says "how good is this node for your taste."
+Categories say "is this the kind of thing you want to see at all." All handles at center (0) =
+everything dimmed. Pull handles outward = those categories brighten proportionally.
+
+**New files:**
+- `tests/test_categories.py` — 18 tests (gate computation, combined scoring, persistence)
+
+**Modified files:**
+- `sigiltree/arcade.py` — Added `save_category_prefs()` + `load_category_prefs()` for separate persistence
+- `sigiltree/sigil_scoring.py` — Added `compute_category_gate()`, modified `compute_sigil_scores()` with optional `category_weights` param
+- `sigiltree/viewer_server.py` — 3 new routes (`/categories`, `/api/categories/data`, `/api/categories/save`), 3 new handlers, `CATEGORIES_HTML` radar chart page, toolbar radar button, help entry, modified `handle_atlas_sigil_scores` to load category prefs
+
+**UI:** Canvas-based radar chart with 11 axes, draggable handles, green polygon fill, percentage labels,
+exemplar thumbnails on hover. Save redirects to `/atlas?sigil=1`. Pre-fills from saved weights.
+
+**Persistence:** `artifacts/sigils/categories_{user_id}.json` — separate from walk sigil.
+
+All 199 tests pass (181 existing + 18 new).
+
+### Previous — Phase 12: Sigil reorder implementation
 
 Branch `phase12-sigil-reorder`. All changes in `sigiltree/viewer_server.py` (client-side JS only).
 
@@ -159,8 +184,8 @@ Atlas UI:
 ### Backlog
 1. **Materialize the emergent taste contrast** — the calibration walk discovers coefficients of a personal good-bad axis in contrast space. Currently computed transiently as a dot product during scoring. Make it a first-class contrast: own z-summary per node, own exemplars (top-N / bottom-N images), own name. The individual contrasts are scaffolding; the emergent one is the signal. This is dimensionality reduction from N contrasts to one personally meaningful axis.
 2. **Live sigil during calibration** — show taste sigil updating in real-time during walk (experimental featurette)
-3. **Categorical calibration** — tier-list UI for unipolar semantic categories (the 11 sem_ contrasts the walk excludes)
-4. **README / landing page** — explain the "neighborhood is a sigil" vision
+3. **README / landing page** — explain the "neighborhood is a sigil" vision
+4. **Evolve the spec** — refine the specification to match what has been built. The spec should evolve as the product does, becoming a sigil of this application: a sigil that, when worn by an LLM, will get it to design an app to this spec within the resolution of the spec. Our secondary deliverable is the evolved spec: the sigil of sigilatlas.
 
 ## Phase 11: The Sigil Graph — No Leaves, No Dead Ends (COMPLETE)
 

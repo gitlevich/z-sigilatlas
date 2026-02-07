@@ -400,3 +400,35 @@ def load_sigil(artifact_dir: Path, user_id: str = "default") -> dict | None:
     if not path.exists():
         return None
     return json.loads(path.read_text())
+
+
+# ---------------------------------------------------------------------------
+# Category preferences (radar-based filter)
+# ---------------------------------------------------------------------------
+
+def save_category_prefs(prefs: dict, artifact_dir: Path) -> Path:
+    """Save category filter preferences to artifact directory.
+
+    Args:
+        prefs: {user_id, weights: {contrast_id: float}, ...}
+        artifact_dir: Root artifact directory.
+
+    Returns:
+        Path to saved file.
+    """
+    sigil_dir = artifact_dir / "sigils"
+    sigil_dir.mkdir(exist_ok=True)
+    user_id = prefs.get("user_id", "default")
+    path = sigil_dir / f"categories_{user_id}.json"
+    path.write_text(json.dumps(prefs, indent=2))
+    active = sum(1 for v in prefs.get("weights", {}).values() if v > 0.01)
+    log.info("Saved category prefs: %s (%d active categories)", path, active)
+    return path
+
+
+def load_category_prefs(artifact_dir: Path, user_id: str = "default") -> dict | None:
+    """Load category filter preferences from artifact directory."""
+    path = artifact_dir / "sigils" / f"categories_{user_id}.json"
+    if not path.exists():
+        return None
+    return json.loads(path.read_text())

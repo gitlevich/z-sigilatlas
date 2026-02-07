@@ -15,11 +15,97 @@ import logging
 log = logging.getLogger(__name__)
 
 
+def compute_category_gate(
+    category_weights: dict[str, float],
+    contrast_library: dict,
+    coordinates: dict[str, dict[str, float]],
+    nodes: list[dict],
+) -> dict[str, float]:
+    """Compute per-node category gate values for multiplicative filtering.
+
+    Each category weight (0 to 1) controls how much that category contributes.
+    Gate = weighted average of normalized category coordinates across active
+    categories. Nodes matching active categories get higher gates.
+
+    Args:
+        category_weights: {contrast_id: weight} where weight in [0, 1].
+        contrast_library: Full contrast library with quantiles.
+        coordinates: {contrast_name: {image_id: float}} per-image scores.
+        nodes: List of atlas node dicts, each with node_id and image_ids.
+
+    Returns:
+        {node_id: gate_value} where gate_value in [0, 1].
+        Returns all 1.0 if no active categories.
+    """
+    if not category_weights:
+        return {node["node_id"]: 1.0 for node in nodes}
+
+    # Filter to active categories (weight > 0)
+    active = {cid: w for cid, w in category_weights.items() if w > 0.01}
+    if not active:
+        return {node["node_id"]: 0.0 for node in nodes}
+
+    # Build lookup: contrast_id -> {name, quantiles, coords}
+    id_to_info = {}
+    for c in contrast_library.get("contrasts", []):
+        cid = c["contrast_id"]
+        if cid not in active:
+            continue
+        cname = c["name"]
+        if cname not in coordinates:
+            log.warning("Category %s not in coordinates, skipping", cname)
+            continue
+        id_to_info[cid] = {
+            "name": cname,
+            "p10": c["quantiles"]["p10"],
+            "p90": c["quantiles"]["p90"],
+            "coords": coordinates[cname],
+        }
+
+    if not id_to_info:
+        return {node["node_id"]: 0.0 for node in nodes}
+
+    total_weight = sum(active[cid] for cid in id_to_info)
+
+    result = {}
+    for node in nodes:
+        image_ids = node.get("image_ids", [])
+        weighted_sum = 0.0
+
+        for cid, info in id_to_info.items():
+            weight = active[cid]
+
+            # Compute node mean for this category
+            values = []
+            for iid in image_ids:
+                val = info["coords"].get(iid)
+                if val is not None:
+                    values.append(val)
+
+            if not values:
+                normalized = 0.5
+            else:
+                node_mean = sum(values) / len(values)
+                span = info["p90"] - info["p10"]
+                if span > 0:
+                    normalized = max(0.0, min(1.0, (node_mean - info["p10"]) / span))
+                else:
+                    normalized = 0.5
+
+            weighted_sum += weight * normalized
+
+        gate = weighted_sum / total_weight if total_weight > 0 else 0.0
+        result[node["node_id"]] = max(0.0, min(1.0, gate))
+
+    return result
+
+
 def compute_sigil_scores(
     sigil: dict,
     contrast_library: dict,
     coordinates: dict[str, dict[str, float]],
     nodes: list[dict],
+    category_weights: dict[str, float] | None = None,
 ) -> dict[str, dict]:
     """Compute per-node sigil compatibility scores.
 
@@ -28,17 +114,32 @@ def compute_sigil_scores(
         contrast_library: Full contrast library with quantiles.
         coordinates: {contrast_name: {image_id: float}} per-image scores.
         nodes: List of atlas node dicts, each with node_id and image_ids.
+        category_weights: Optional {contrast_id: weight} for multiplicative
+            category filter. If provided, final score = walk_score * gate.
 
     Returns:
         {node_id: {"score": float, "breakdown": [...]}}
         score in [0, 1]: 1 = perfectly aligned with sigil, 0 = opposite.
     """
-    entries = sigil.get("entries", {})
+    entries = sigil.get("entries", {}) if sigil else {}
+
+    # Compute category gates if weights provided
+    gates = None
+    if category_weights is not None:
+        gates = compute_category_gate(
+            category_weights, contrast_library, coordinates, nodes
+        )
+
     if not entries:
-        return {
+        base = {
             node["node_id"]: {"score": 0.5, "breakdown": []}
             for node in nodes
         }
+        if gates is not None:
+            for nid in base:
+                base[nid]["score"] = round(0.5 * gates.get(nid, 1.0), 6)
+                base[nid]["gate"] = round(gates.get(nid, 1.0), 6)
+        return base
 
     # Build quantile lookup: contrast_id -> {p10, p90}
     quantile_lookup = {}
@@ -130,9 +231,16 @@ def compute_sigil_scores(
         score = total_contribution / len(collapsed) if collapsed else 0.5
         score = max(0.0, min(1.0, score))
 
-        result[node["node_id"]] = {
-            "score": round(score, 6),
+        # Apply multiplicative category gate
+        gate = gates.get(node["node_id"], 1.0) if gates else 1.0
+        final_score = score * gate
+
+        entry = {
+            "score": round(final_score, 6),
             "breakdown": breakdown,
         }
+        if gates is not None:
+            entry["gate"] = round(gate, 6)
+        result[node["node_id"]] = entry
 
     return result
