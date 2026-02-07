@@ -1958,7 +1958,6 @@ ATLAS_VIEWER_HTML = r"""<!DOCTYPE html>
     </div>
     <span class="section-label">Navigate</span>
     <div class="key-row"><kbd>Click</kbd><span class="key-desc">Enter a neighborhood</span></div>
-    <div class="key-row"><kbd>Drag</kbd><span class="key-desc">Pan around</span></div>
     <div class="key-row"><kbd>Esc</kbd><span class="key-desc">Back one level</span></div>
     <span class="section-label">Toolbar</span>
     <div class="key-row"><kbd>&#x21A9;</kbd><span class="key-desc">Back one level</span></div>
