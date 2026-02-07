@@ -158,11 +158,12 @@ class TestWalkSession:
         session = WalkSession(lib)
         assert len(session.steps) == 5  # only bipolars
 
-    def test_step_has_no_contrast_name(self):
+    def test_step_includes_contrast_name_but_not_id(self):
         lib = _make_walk_library(n_bipolar=3)
         session = WalkSession(lib)
         step_dict = session.step_to_dict(session.current_step)
-        assert "contrast_name" not in step_dict
+        assert "contrast_name" in step_dict
+        assert isinstance(step_dict["contrast_name"], str)
         assert "contrast_id" not in step_dict
 
     def test_correct_exemplar_count_per_side(self):
@@ -461,3 +462,25 @@ class TestPartialSigil:
             assert "direction" in entry
             assert "strength" in entry
             assert 0.0 <= entry["strength"] <= 1.0
+
+
+class TestStepDict:
+    """step_to_dict serialization."""
+
+    def test_step_to_dict_includes_contrast_name(self):
+        lib = _make_walk_library(n_bipolar=3, n_unipolar=0, n_pca=0)
+        session = WalkSession(lib)
+        step = session.current_step
+        d = session.step_to_dict(step)
+        assert "contrast_name" in d
+        assert isinstance(d["contrast_name"], str)
+        assert len(d["contrast_name"]) > 0
+
+    def test_step_to_dict_contrast_name_matches_step(self):
+        lib = _make_walk_library(n_bipolar=3, n_unipolar=0, n_pca=0)
+        session = WalkSession(lib)
+        step = session.current_step
+        d = session.step_to_dict(step)
+        # The contrast_name should match what _contrast_name returns
+        expected = session._contrast_name(step.contrast_id)
+        assert d["contrast_name"] == expected

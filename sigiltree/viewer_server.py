@@ -1666,21 +1666,29 @@ body {
 .done-detail { font-size: 14px; color: #666; }
 #sigil-radar {
   position: fixed; bottom: 24px; right: 16px;
-  width: 160px; height: 160px;
-  border-radius: 8px; background: rgba(17,17,17,0.9);
-  border: 1px solid #282828;
+  width: 220px; height: 220px;
+  border-radius: 8px; background: rgba(17,17,17,0.95);
+  border: 1px solid #333;
   opacity: 0; transition: opacity 0.6s ease;
   pointer-events: none; z-index: 20;
 }
 #sigil-radar.visible { opacity: 1; }
 #sigil-count {
-  position: fixed; bottom: 8px; right: 16px;
-  width: 160px; text-align: center;
-  font-size: 10px; color: #555; letter-spacing: 0.5px;
+  position: fixed; bottom: 6px; right: 16px;
+  width: 220px; text-align: center;
+  font-size: 11px; color: #777; letter-spacing: 0.5px;
   opacity: 0; transition: opacity 0.6s ease;
   pointer-events: none; z-index: 20;
 }
 #sigil-count.visible { opacity: 1; }
+#contrast-label {
+  position: fixed; top: 14px; left: 0; right: 0;
+  text-align: center; z-index: 10;
+  font-size: 13px; color: #666; letter-spacing: 0.5px;
+  pointer-events: none;
+  opacity: 0; transition: opacity 0.3s ease;
+}
+#contrast-label.visible { opacity: 1; }
 .exit-btn {
   position: fixed; top: 12px; left: 16px; z-index: 50;
   background: none; border: 1px solid #444; color: #888;
@@ -1699,6 +1707,7 @@ body {
 <body>
 
 <button class="exit-btn" onclick="window.location='/atlas'">exit <span class="hint">[Esc]</span></button>
+<div id="contrast-label"></div>
 <div class="arena">
   <div class="mosaic-col" onclick="choose('left')">
     <div id="mosaic-left" class="mosaic loading"></div>
@@ -1713,7 +1722,7 @@ body {
   <button class="skip-btn" onclick="choose('skip')">skip <span class="hint">[Space]</span></button>
 </div>
 <div id="progress" class="progress-bar"></div>
-<canvas id="sigil-radar" width="160" height="160"></canvas>
+<canvas id="sigil-radar" width="220" height="220"></canvas>
 <div id="sigil-count"></div>
 <div id="done-overlay" class="done-overlay">
   <div class="done-msg" id="done-msg">Preferences recorded.</div>
@@ -1731,9 +1740,9 @@ let radarContrasts = [];   // [{id, name}] — all bipolar contrasts
 let sigilEntries = {};     // {contrast_id: {name, dir, str}} from partial_sigil
 let animValues = {};       // {contrast_id: current_animated_value}
 let radarCtx = null;
-const RADAR_SIZE = 160;
-const RADAR_PAD = 28;
-const RADAR_LABEL_PAD = 14;
+const RADAR_SIZE = 220;
+const RADAR_PAD = 36;
+const RADAR_LABEL_PAD = 16;
 
 function formatContrastName(name) {
   // sem_abstract_vs_representational -> abstract / representational
@@ -1787,8 +1796,8 @@ function drawSigilRadar() {
       else radarCtx.lineTo(x, y);
     }
     radarCtx.closePath();
-    radarCtx.strokeStyle = frac === 1.0 ? '#2a2a2a' : '#1e1e1e';
-    radarCtx.lineWidth = 0.5;
+    radarCtx.strokeStyle = frac === 1.0 ? '#383838' : '#2a2a2a';
+    radarCtx.lineWidth = 0.75;
     radarCtx.stroke();
   }
 
@@ -1799,8 +1808,8 @@ function drawSigilRadar() {
     radarCtx.moveTo(cx, cy);
     radarCtx.lineTo(ex, ey);
     const entry = order[i].entry;
-    radarCtx.strokeStyle = entry ? 'rgba(255,255,255,0.08)' : 'rgba(255,255,255,0.03)';
-    radarCtx.lineWidth = 0.5;
+    radarCtx.strokeStyle = entry ? 'rgba(255,255,255,0.15)' : 'rgba(255,255,255,0.06)';
+    radarCtx.lineWidth = 0.75;
     radarCtx.stroke();
   }
 
@@ -1829,15 +1838,15 @@ function drawSigilRadar() {
     const fr = Math.round(255 * rightRatio + 100 * (1 - rightRatio));
     const fg = Math.round(170 * rightRatio + 160 * (1 - rightRatio));
     const fb = Math.round(0 * rightRatio + 255 * (1 - rightRatio));
-    radarCtx.fillStyle = `rgba(${fr},${fg},${fb},0.08)`;
+    radarCtx.fillStyle = `rgba(${fr},${fg},${fb},0.15)`;
     radarCtx.fill();
-    radarCtx.strokeStyle = `rgba(${fr},${fg},${fb},0.35)`;
-    radarCtx.lineWidth = 1;
+    radarCtx.strokeStyle = `rgba(${fr},${fg},${fb},0.5)`;
+    radarCtx.lineWidth = 1.5;
     radarCtx.stroke();
   }
 
   // Handle dots + labels for collapsed contrasts
-  radarCtx.font = '7px system-ui, sans-serif';
+  radarCtx.font = '9px system-ui, sans-serif';
   radarCtx.textAlign = 'center';
   radarCtx.textBaseline = 'middle';
   for (let i = 0; i < n; i++) {
@@ -1846,12 +1855,12 @@ function drawSigilRadar() {
     const [hx, hy] = radarEndpoint(cx, cy, r * o.val, i, n);
     // Dot
     radarCtx.beginPath();
-    radarCtx.arc(hx, hy, 2.5, 0, Math.PI * 2);
+    radarCtx.arc(hx, hy, 3.5, 0, Math.PI * 2);
     radarCtx.fillStyle = o.entry && o.entry.dir === 'right' ? '#ffa800' : '#68a8ff';
     radarCtx.fill();
     // Label
     const [lx, ly] = radarEndpoint(cx, cy, r * o.val + RADAR_LABEL_PAD, i, n);
-    radarCtx.fillStyle = o.entry && o.entry.dir === 'right' ? 'rgba(255,168,0,0.6)' : 'rgba(104,168,255,0.6)';
+    radarCtx.fillStyle = o.entry && o.entry.dir === 'right' ? 'rgba(255,168,0,0.8)' : 'rgba(104,168,255,0.8)';
     radarCtx.fillText(formatContrastName(o.name), lx, ly);
   }
 }
@@ -1901,6 +1910,13 @@ async function startWalk() {
 
 async function showStep(step) {
   currentStep = step;
+  const label = document.getElementById('contrast-label');
+  if (step.contrast_name) {
+    label.textContent = formatContrastName(step.contrast_name);
+    label.classList.add('visible');
+  } else {
+    label.classList.remove('visible');
+  }
   const ml = document.getElementById('mosaic-left');
   const mr = document.getElementById('mosaic-right');
 

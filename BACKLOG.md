@@ -2,7 +2,7 @@
 
 Prioritized work items.
 
-1. **Display current contrast on calibration screen** — show which contrast axis the user is currently choosing between during the calibration walk.
+1. **Calibration walk polish** — (a) make the live sigil radar chart more visible (currently too subtle), (b) display the currently calibrated contrast as a label on screen, (c) add a toggle button to show the user's taste sigil on the atlas page.
 
 2. **Materialize the emergent taste contrast** — the calibration walk discovers coefficients of a personal good-bad axis in contrast space. Currently computed transiently as a dot product during scoring. Make it a first-class contrast: own z-summary per node, own exemplars (top-N / bottom-N images), own name. The individual contrasts are scaffolding; the emergent one is the signal. This is dimensionality reduction from N contrasts to one personally meaningful axis.
 
@@ -12,4 +12,6 @@ Prioritized work items.
 
 5. **Rename walk to calibration** — rename the concept from "walk" to "calibration" throughout; remap `/walk` path to `/calibration`.
 
-6. **Evolve the spec** — refine the specification to match what has been built. The spec should evolve as the product does, becoming a sigil of this application: a sigil that, when worn by an LLM, will get it to design an app to this spec within the resolution of the spec. Our secondary deliverable is the evolved spec: the sigil of sigilatlas.
+6. **Make category selection visible in atlas** — category radar preferences should visibly affect the atlas display. Currently unclear whether they are reflected.
+
+7. **Evolve the spec** — refine the specification to match what has been built. The spec should evolve as the product does, becoming a sigil of this application: a sigil that, when worn by an LLM, will get it to design an app to this spec within the resolution of the spec. Our secondary deliverable is the evolved spec: the sigil of sigilatlas.

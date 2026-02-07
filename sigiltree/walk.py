@@ -293,10 +293,11 @@ class WalkSession:
         return None
 
     def step_to_dict(self, step: WalkStep) -> dict:
-        """Serialize step for JSON response. No contrast names exposed."""
+        """Serialize step for JSON response."""
         return {
             "left_ids": step.left_ids,
             "right_ids": step.right_ids,
             "is_repeat": step.is_repeat,
             "step_index": step.step_index,
+            "contrast_name": self._contrast_name(step.contrast_id),
         }
