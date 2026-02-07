@@ -2366,9 +2366,9 @@ ATLAS_VIEWER_HTML = r"""<!DOCTYPE html>
     <span class="section-label">Toolbar</span>
     <div class="key-row"><kbd>&#x21A9;</kbd><span class="key-desc">Back one level</span></div>
     <div class="key-row"><kbd>&#x2302;</kbd><span class="key-desc">Return home</span></div>
-    <div class="key-row"><kbd>&#x2696;</kbd><span class="key-desc">Calibrate your taste (left/right walk)</span></div>
-    <div class="key-row"><kbd style="font-size:10px">radar</kbd><span class="key-desc">Category filter (portrait, landscape, etc.)</span></div>
-    <div class="key-row"><kbd style="font-size:10px">sigil</kbd><span class="key-desc">Toggle your taste overlay on/off</span></div>
+    <div class="key-row"><kbd>&#x2696;</kbd><span class="key-desc">Taste walk &mdash; choose between image pairs to teach the atlas your preferences</span></div>
+    <div class="key-row"><kbd><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" style="width:16px;height:16px;vertical-align:middle"><polygon points="12,2 22,9 19,20 5,20 2,9" fill="none"/><polygon points="12,8 17,11 15,17 9,17 7,11" fill="none"/><circle cx="12" cy="12" r="1.5" fill="currentColor" stroke="none"/></svg></kbd><span class="key-desc">Category filter &mdash; pull radar handles to include portrait, landscape, architecture, etc.</span></div>
+    <div class="key-row"><kbd><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" style="width:16px;height:16px;vertical-align:middle"><ellipse cx="12" cy="12" rx="9" ry="10"/><ellipse cx="12" cy="12" rx="6.5" ry="7.5"/><ellipse cx="12" cy="12" rx="4" ry="5"/><ellipse cx="12" cy="12" rx="1.5" ry="2.5"/></svg></kbd><span class="key-desc">Toggle taste overlay &mdash; matching neighborhoods brighten and grow</span></div>
     <div class="dismiss">Click anywhere to begin</div>
   </div>
 </div>
