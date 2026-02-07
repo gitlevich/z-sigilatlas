@@ -69,6 +69,16 @@ fly deploy                                       # deploy to Fly.io
 - Camera locked to viewport, click-only navigation
 - Toolbar: Back, Home, Walk, Categories, Sigil, Help
 
+### Phase workflow
+
+Each implementation phase follows this sequence:
+
+1. Branch, implement, test
+2. Merge to master, push, deploy
+3. Verify in browser
+4. Update STATUS.md
+5. **Housekeeping** — update README if user-facing changes, check `.gitignore` for new artifact patterns, remove stale files, run test count
+
 ### Artifacts
 
 ```
