@@ -157,9 +157,10 @@ Atlas UI:
 - Contain-fit rendering: `Math.min` scale, full image, no cropping
 
 ### Backlog
-1. **Live sigil during calibration** — show taste sigil updating in real-time during walk (experimental featurette)
-2. **Categorical calibration** — tier-list UI for unipolar semantic categories (the 11 sem_ contrasts the walk excludes)
-3. **README / landing page** — explain the "neighborhood is a sigil" vision
+1. **Materialize the emergent taste contrast** — the calibration walk discovers coefficients of a personal good-bad axis in contrast space. Currently computed transiently as a dot product during scoring. Make it a first-class contrast: own z-summary per node, own exemplars (top-N / bottom-N images), own name. The individual contrasts are scaffolding; the emergent one is the signal. This is dimensionality reduction from N contrasts to one personally meaningful axis.
+2. **Live sigil during calibration** — show taste sigil updating in real-time during walk (experimental featurette)
+3. **Categorical calibration** — tier-list UI for unipolar semantic categories (the 11 sem_ contrasts the walk excludes)
+4. **README / landing page** — explain the "neighborhood is a sigil" vision
 
 ## Phase 11: The Sigil Graph — No Leaves, No Dead Ends (COMPLETE)
 
