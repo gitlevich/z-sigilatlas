@@ -2088,7 +2088,15 @@ function updateCamera() {
 async function fetchSigilScores(level) {
   if (sigilFetching) return;
   const cacheKey = sigilMeta ? `${sigilMeta.sigil_version}_${level}` : null;
-  if (sigilScores[level] && cacheKey && sigilScores[`_key_${level}`] === cacheKey) return;
+  if (sigilScores[level] && cacheKey && sigilScores[`_key_${level}`] === cacheKey) {
+    // Scores cached — still apply layout if sigil is active (e.g. re-toggle)
+    if (sigilActive) {
+      applySigilLayout(viewStack.length - 1);
+      fitOverview();
+      scheduleFrame();
+    }
+    return;
+  }
 
   sigilFetching = true;
   try {
@@ -2188,20 +2196,43 @@ function layoutWithSigil(nodes, bounds, level) {
     return s !== undefined ? s : 0.5;
   }
 
-  // Sort by score descending: high-scoring nodes first -> placed center/top-left
-  const sorted = [...nodes].sort((a, b) => nodeScore(b) - nodeScore(a));
-
-  // Inflate weights: 3:1 ratio between best (1.5x) and worst (0.5x)
-  const inflated = sorted.map(n => ({
+  // Layout with inflated weights: favorites get more area.
+  // 3:1 ratio between best (1.5x) and worst (0.5x).
+  const inflated = nodes.map(n => ({
     ...n,
     size: Math.max(1, (n.size || 1) * (0.5 + nodeScore(n))),
   }));
-
   const laidOut = layoutAsTreemap(inflated, bounds);
 
-  // Restore original sizes so downstream code sees real image counts
+  // Rect reassignment: favorites attract to center, disliked repel to edges.
+  // 1. Rank rects by centrality (distance from bounds center, ascending).
+  // 2. Rank nodes by score (descending).
+  // 3. Pair them: best node <-> most central rect, preserving each rect's size.
+  const [bx, by, bw, bh] = bounds || [0, 0, 1, 1];
+  const centerX = bx + bw / 2;
+  const centerY = by + bh / 2;
+
+  // Build rect list with original indices
+  const rects = laidOut.map((n, i) => ({
+    idx: i,
+    rect: n.rect,
+    dist: Math.hypot(n.rect[0] + n.rect[2]/2 - centerX, n.rect[1] + n.rect[3]/2 - centerY),
+  }));
+  rects.sort((a, b) => a.dist - b.dist);  // most central first
+
+  // Build node list sorted by score descending
+  const scored = laidOut.map((n, i) => ({idx: i, score: nodeScore(n)}));
+  scored.sort((a, b) => b.score - a.score);  // best first
+
+  // Assign: best-scored node gets the most-central rect
+  const assignedRect = new Array(laidOut.length);
+  for (let rank = 0; rank < rects.length; rank++) {
+    assignedRect[scored[rank].idx] = rects[rank].rect;
+  }
+
   for (let i = 0; i < laidOut.length; i++) {
-    laidOut[i].size = sorted[i].size;
+    laidOut[i].rect = assignedRect[i];
+    laidOut[i].size = nodes[i].size;  // restore original size
   }
   return laidOut;
 }
