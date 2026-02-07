@@ -411,3 +411,53 @@ class TestWalkCompletion:
             session.record_choice("skip")
         assert session.is_complete
         assert session.current_step is None
+
+
+# ---------------------------------------------------------------------------
+# TestPartialSigil
+# ---------------------------------------------------------------------------
+
+class TestPartialSigil:
+    """Partial sigil building mid-walk for live radar preview."""
+
+    def test_skip_only_produces_no_entries(self):
+        lib = _make_walk_library(n_bipolar=3, n_unipolar=0, n_pca=0)
+        session = WalkSession(lib)
+        session.record_choice("skip")
+        sigil = build_sigil(session.choices, session.library_version, session.user_id)
+        assert sigil["collapsed_count"] == 0
+        assert len(sigil["entries"]) == 0
+
+    def test_one_directional_choice_produces_one_entry(self):
+        lib = _make_walk_library(n_bipolar=3, n_unipolar=0, n_pca=0)
+        session = WalkSession(lib)
+        session.record_choice("left")
+        sigil = build_sigil(session.choices, session.library_version, session.user_id)
+        assert sigil["collapsed_count"] == 1
+        assert len(sigil["entries"]) == 1
+        entry = list(sigil["entries"].values())[0]
+        assert entry["strength"] == 1.0
+        assert entry["direction"] in ("left", "right")
+
+    def test_partial_sigil_accumulates_across_contrasts(self):
+        lib = _make_walk_library(n_bipolar=4, n_unipolar=0, n_pca=0)
+        session = WalkSession(lib)
+        session.record_choice("right")  # first contrast
+        session.record_choice("left")   # second contrast
+        session.record_choice("skip")   # third contrast — no entry
+        sigil = build_sigil(session.choices, session.library_version, session.user_id)
+        assert sigil["collapsed_count"] == 2
+        # Entries should have distinct contrast_ids
+        cids = [e["contrast_id"] for e in sigil["entries"].values()]
+        assert len(set(cids)) == 2
+
+    def test_partial_sigil_has_valid_entry_fields(self):
+        lib = _make_walk_library(n_bipolar=2, n_unipolar=0, n_pca=0)
+        session = WalkSession(lib)
+        session.record_choice("right")
+        sigil = build_sigil(session.choices, session.library_version, session.user_id)
+        for entry in sigil["entries"].values():
+            assert "contrast_name" in entry
+            assert "direction" in entry
+            assert "strength" in entry
+            assert 0.0 <= entry["strength"] <= 1.0

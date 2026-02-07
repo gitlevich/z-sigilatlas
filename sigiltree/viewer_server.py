@@ -292,10 +292,15 @@ async def handle_walk_start(request: web.Request) -> web.Response:
     request.app["walk_sessions"][user_id] = session
 
     step = session.current_step
+    bipolar_info = [
+        {"id": c["contrast_id"], "name": c["name"]}
+        for c in session.bipolars
+    ]
     return web.json_response({
         "status": "started",
         "step": session.step_to_dict(step) if step else None,
         "progress": session.progress,
+        "contrasts": bipolar_info,
     })
 
 
@@ -319,6 +324,24 @@ async def handle_walk_choose(request: web.Request) -> web.Response:
         from sigiltree.arcade import save_sigil
         artifact_dir = request.app["artifact_dir"]
         save_sigil(result["sigil"], artifact_dir)
+    elif direction in ("left", "right"):
+        # Build partial sigil for live radar preview
+        from sigiltree.arcade import build_sigil
+        partial = build_sigil(
+            session.choices, session.library_version, session.user_id
+        )
+        if partial["collapsed_count"] > 0:
+            result["partial_sigil"] = {
+                "entries": {
+                    cid: {
+                        "name": e["contrast_name"],
+                        "dir": e["direction"],
+                        "str": e["strength"],
+                    }
+                    for cid, e in partial["entries"].items()
+                },
+                "collapsed_count": partial["collapsed_count"],
+            }
 
     return web.json_response(result)
 
@@ -1641,6 +1664,23 @@ body {
 .done-overlay.visible { opacity: 1; pointer-events: auto; }
 .done-msg { font-size: 24px; color: #ccc; font-weight: 300; }
 .done-detail { font-size: 14px; color: #666; }
+#sigil-radar {
+  position: fixed; bottom: 24px; right: 16px;
+  width: 160px; height: 160px;
+  border-radius: 8px; background: rgba(17,17,17,0.9);
+  border: 1px solid #282828;
+  opacity: 0; transition: opacity 0.6s ease;
+  pointer-events: none; z-index: 20;
+}
+#sigil-radar.visible { opacity: 1; }
+#sigil-count {
+  position: fixed; bottom: 8px; right: 16px;
+  width: 160px; text-align: center;
+  font-size: 10px; color: #555; letter-spacing: 0.5px;
+  opacity: 0; transition: opacity 0.6s ease;
+  pointer-events: none; z-index: 20;
+}
+#sigil-count.visible { opacity: 1; }
 .exit-btn {
   position: fixed; top: 12px; left: 16px; z-index: 50;
   background: none; border: 1px solid #444; color: #888;
@@ -1673,6 +1713,8 @@ body {
   <button class="skip-btn" onclick="choose('skip')">skip <span class="hint">[Space]</span></button>
 </div>
 <div id="progress" class="progress-bar"></div>
+<canvas id="sigil-radar" width="160" height="160"></canvas>
+<div id="sigil-count"></div>
 <div id="done-overlay" class="done-overlay">
   <div class="done-msg" id="done-msg">Preferences recorded.</div>
   <div class="done-detail" id="done-detail">Returning to atlas...</div>
@@ -1684,6 +1726,162 @@ let totalSteps = 0;
 let stepIndex = 0;
 let choosing = false;
 
+// Live sigil radar state
+let radarContrasts = [];   // [{id, name}] — all bipolar contrasts
+let sigilEntries = {};     // {contrast_id: {name, dir, str}} from partial_sigil
+let animValues = {};       // {contrast_id: current_animated_value}
+let radarCtx = null;
+const RADAR_SIZE = 160;
+const RADAR_PAD = 28;
+const RADAR_LABEL_PAD = 14;
+
+function formatContrastName(name) {
+  // sem_abstract_vs_representational -> abstract / representational
+  let s = name.replace(/^sem_/, '').replace(/^pca_/, '');
+  s = s.replace(/_vs_/g, ' / ').replace(/_/g, ' ');
+  // Abbreviate long names
+  if (s.length > 14) {
+    const parts = s.split(' / ');
+    if (parts.length === 2) {
+      s = parts.map(p => p.slice(0, 6)).join(' / ');
+    } else if (s.length > 16) {
+      s = s.slice(0, 14);
+    }
+  }
+  return s;
+}
+
+function radarAngle(i, n) {
+  return -Math.PI / 2 + (2 * Math.PI * i) / n;
+}
+
+function radarEndpoint(cx, cy, r, i, n) {
+  const a = radarAngle(i, n);
+  return [cx + Math.cos(a) * r, cy + Math.sin(a) * r];
+}
+
+function drawSigilRadar() {
+  if (!radarCtx || radarContrasts.length === 0) return;
+  const n = radarContrasts.length;
+  const cx = RADAR_SIZE / 2;
+  const cy = RADAR_SIZE / 2;
+  const r = cx - RADAR_PAD;
+
+  radarCtx.clearRect(0, 0, RADAR_SIZE, RADAR_SIZE);
+
+  // Sort contrasts: collapsed by strength descending, then uncollapsed
+  // This shapes the polygon into a teardrop
+  const order = radarContrasts.map((c, i) => ({
+    ...c, origIdx: i,
+    val: animValues[c.id] || 0,
+    entry: sigilEntries[c.id] || null,
+  }));
+  order.sort((a, b) => b.val - a.val);
+
+  // Guide rings
+  for (const frac of [0.33, 0.66, 1.0]) {
+    radarCtx.beginPath();
+    for (let i = 0; i <= n; i++) {
+      const [x, y] = radarEndpoint(cx, cy, r * frac, i, n);
+      if (i === 0) radarCtx.moveTo(x, y);
+      else radarCtx.lineTo(x, y);
+    }
+    radarCtx.closePath();
+    radarCtx.strokeStyle = frac === 1.0 ? '#2a2a2a' : '#1e1e1e';
+    radarCtx.lineWidth = 0.5;
+    radarCtx.stroke();
+  }
+
+  // Axis lines (dim)
+  for (let i = 0; i < n; i++) {
+    const [ex, ey] = radarEndpoint(cx, cy, r, i, n);
+    radarCtx.beginPath();
+    radarCtx.moveTo(cx, cy);
+    radarCtx.lineTo(ex, ey);
+    const entry = order[i].entry;
+    radarCtx.strokeStyle = entry ? 'rgba(255,255,255,0.08)' : 'rgba(255,255,255,0.03)';
+    radarCtx.lineWidth = 0.5;
+    radarCtx.stroke();
+  }
+
+  // Filled polygon (only if any collapsed)
+  const hasCollapsed = order.some(o => o.val > 0.01);
+  if (hasCollapsed) {
+    radarCtx.beginPath();
+    for (let i = 0; i < n; i++) {
+      const val = order[i].val;
+      const [x, y] = radarEndpoint(cx, cy, r * val, i, n);
+      if (i === 0) radarCtx.moveTo(x, y);
+      else radarCtx.lineTo(x, y);
+    }
+    radarCtx.closePath();
+
+    // Count directions for fill color blend
+    let rightCount = 0, leftCount = 0;
+    for (const o of order) {
+      if (o.entry) {
+        if (o.entry.dir === 'right') rightCount++;
+        else leftCount++;
+      }
+    }
+    const rightRatio = rightCount / Math.max(1, rightCount + leftCount);
+    // Blend amber and blue based on direction mix
+    const fr = Math.round(255 * rightRatio + 100 * (1 - rightRatio));
+    const fg = Math.round(170 * rightRatio + 160 * (1 - rightRatio));
+    const fb = Math.round(0 * rightRatio + 255 * (1 - rightRatio));
+    radarCtx.fillStyle = `rgba(${fr},${fg},${fb},0.08)`;
+    radarCtx.fill();
+    radarCtx.strokeStyle = `rgba(${fr},${fg},${fb},0.35)`;
+    radarCtx.lineWidth = 1;
+    radarCtx.stroke();
+  }
+
+  // Handle dots + labels for collapsed contrasts
+  radarCtx.font = '7px system-ui, sans-serif';
+  radarCtx.textAlign = 'center';
+  radarCtx.textBaseline = 'middle';
+  for (let i = 0; i < n; i++) {
+    const o = order[i];
+    if (o.val < 0.01) continue;
+    const [hx, hy] = radarEndpoint(cx, cy, r * o.val, i, n);
+    // Dot
+    radarCtx.beginPath();
+    radarCtx.arc(hx, hy, 2.5, 0, Math.PI * 2);
+    radarCtx.fillStyle = o.entry && o.entry.dir === 'right' ? '#ffa800' : '#68a8ff';
+    radarCtx.fill();
+    // Label
+    const [lx, ly] = radarEndpoint(cx, cy, r * o.val + RADAR_LABEL_PAD, i, n);
+    radarCtx.fillStyle = o.entry && o.entry.dir === 'right' ? 'rgba(255,168,0,0.6)' : 'rgba(104,168,255,0.6)';
+    radarCtx.fillText(formatContrastName(o.name), lx, ly);
+  }
+}
+
+function animateSigilUpdate(newEntries) {
+  const targets = {};
+  for (const c of radarContrasts) {
+    const e = newEntries[c.id];
+    targets[c.id] = e ? e.str : 0;
+  }
+
+  const startVals = {...animValues};
+  const startTime = performance.now();
+  const duration = 500;
+
+  function tick(now) {
+    const t = Math.min(1.0, (now - startTime) / duration);
+    const ease = t * (2 - t); // ease-out quad
+    for (const c of radarContrasts) {
+      const from = startVals[c.id] || 0;
+      const to = targets[c.id] || 0;
+      animValues[c.id] = from + (to - from) * ease;
+    }
+    sigilEntries = newEntries;
+    drawSigilRadar();
+    if (t < 1.0) requestAnimationFrame(tick);
+  }
+  requestAnimationFrame(tick);
+}
+
 async function startWalk() {
   const r = await fetch('/api/walk/start', {
     method: 'POST',
@@ -1694,6 +1892,8 @@ async function startWalk() {
   if (data.status === 'started' && data.step) {
     totalSteps = data.progress.total;
     stepIndex = 0;
+    radarContrasts = data.contrasts || [];
+    radarCtx = document.getElementById('sigil-radar').getContext('2d');
     renderProgress(data.progress);
     await showStep(data.step);
   }
@@ -1766,6 +1966,15 @@ async function choose(direction) {
     leftCol.classList.remove('flash-left');
     rightCol.classList.remove('flash-right');
   }, 250);
+
+  // Update live sigil radar
+  if (data.partial_sigil && data.partial_sigil.collapsed_count > 0) {
+    animateSigilUpdate(data.partial_sigil.entries);
+    document.getElementById('sigil-radar').classList.add('visible');
+    const countEl = document.getElementById('sigil-count');
+    countEl.classList.add('visible');
+    countEl.textContent = `${data.partial_sigil.collapsed_count} / ${radarContrasts.length} tastes`;
+  }
 
   if (data.status === 'complete') {
     const collapsed = data.sigil ? data.sigil.collapsed_count : 0;
