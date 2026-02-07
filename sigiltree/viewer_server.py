@@ -1933,6 +1933,7 @@ let sigilScores = {};       // {level: {node_id: {score, breakdown}}}
 let sigilVisual = {};       // {level: {node_id: float}} rank-stretched to [0,1]
 let sigilMeta = null;       // {sigil_version, collapsed_contrasts}
 let sigilFetching = false;
+let originalLayouts = {};   // {stackIndex: [{node_id, rect}]} for sigil reorder restore
 
 // Node labels: descriptive text per node from z-summaries
 let nodeLabels = {};        // {level: {node_id: string}}
@@ -2109,6 +2110,10 @@ async function fetchSigilScores(level) {
     sigilScores[level] = data.scores;
     sigilScores[`_key_${level}`] = `${data.sigil_version}_${level}`;
     stretchSigilScores(level);
+    if (sigilActive) {
+      applySigilLayout(viewStack.length - 1);
+      fitOverview();
+    }
     scheduleFrame();
   } catch (e) {
     sigilActive = false;
@@ -2145,6 +2150,116 @@ function updateSigilIndicator() {
   } else {
     el.classList.remove('active');
   }
+}
+
+// ---------------------------------------------------------------------------
+// Sigil-driven layout reordering
+// ---------------------------------------------------------------------------
+
+function saveOriginalLayout(stackIndex) {
+  const frame = viewStack[stackIndex];
+  if (!frame) return;
+  originalLayouts[stackIndex] = frame.nodes.map(n => ({
+    node_id: n.node_id,
+    rect: [...n.rect],
+  }));
+}
+
+function restoreOriginalLayout(stackIndex) {
+  const saved = originalLayouts[stackIndex];
+  if (!saved) return;
+  const frame = viewStack[stackIndex];
+  if (!frame) return;
+  const rectMap = {};
+  for (const s of saved) rectMap[s.node_id] = s.rect;
+  for (const n of frame.nodes) {
+    if (rectMap[n.node_id]) n.rect = rectMap[n.node_id];
+  }
+  delete originalLayouts[stackIndex];
+  if (stackIndex === 0) level0Nodes = frame.nodes;
+}
+
+function layoutWithSigil(nodes, bounds, level) {
+  const vis = sigilVisual[level];
+  if (!vis || nodes.length === 0) return layoutAsTreemap(nodes, bounds);
+
+  function nodeScore(n) {
+    const s = vis[n.node_id];
+    return s !== undefined ? s : 0.5;
+  }
+
+  // Sort by score descending: high-scoring nodes first -> placed center/top-left
+  const sorted = [...nodes].sort((a, b) => nodeScore(b) - nodeScore(a));
+
+  // Inflate weights: 3:1 ratio between best (1.5x) and worst (0.5x)
+  const inflated = sorted.map(n => ({
+    ...n,
+    size: Math.max(1, (n.size || 1) * (0.5 + nodeScore(n))),
+  }));
+
+  const laidOut = layoutAsTreemap(inflated, bounds);
+
+  // Restore original sizes so downstream code sees real image counts
+  for (let i = 0; i < laidOut.length; i++) {
+    laidOut[i].size = sorted[i].size;
+  }
+  return laidOut;
+}
+
+function applySigilLayout(stackIndex) {
+  const frame = viewStack[stackIndex];
+  if (!frame) return;
+  const level = frame.level;
+  if (!sigilVisual[level]) return;
+
+  // Save original layout if not already saved
+  if (!originalLayouts[stackIndex]) {
+    saveOriginalLayout(stackIndex);
+  }
+
+  const backDoor = frame.nodes.find(n => n.door_type === 'back');
+  const others = frame.nodes.filter(n => n.door_type !== 'back');
+  const backStrip = backDoor ? 0.08 : 0;
+
+  let newNodes;
+
+  if (stackIndex === 0 && !backDoor) {
+    // Root level: full bounds
+    newNodes = layoutWithSigil(others, [0, 0, 1, 1], level);
+  } else {
+    // Check for zoned layout (has down doors)
+    const hasDown = others.some(n => n.door_type === 'down');
+    if (hasDown) {
+      const downDoors = others.filter(n => n.door_type === 'down');
+      const lateralDoors = others.filter(n => n.door_type !== 'down');
+
+      const lateralStrip = lateralDoors.length > 0 ? 0.06 : 0;
+      const halfLat = Math.ceil(lateralDoors.length / 2);
+      const leftLaterals = lateralDoors.slice(0, halfLat);
+      const rightLaterals = lateralDoors.slice(halfLat);
+      const leftStrip = leftLaterals.length > 0 ? lateralStrip : 0;
+      const rightStrip = rightLaterals.length > 0 ? lateralStrip : 0;
+
+      const cx = backStrip + leftStrip;
+      const cw = 1 - backStrip - leftStrip - rightStrip;
+      const centerTiles = layoutWithSigil(downDoors, [cx, 0, cw, 1], level);
+
+      let leftTiles = leftLaterals.length > 0
+        ? layoutWithSigil(leftLaterals, [backStrip, 0, leftStrip, 1], level)
+        : [];
+      let rightTiles = rightLaterals.length > 0
+        ? layoutWithSigil(rightLaterals, [1 - rightStrip, 0, rightStrip, 1], level)
+        : [];
+
+      newNodes = [...centerTiles, ...leftTiles, ...rightTiles];
+    } else {
+      // Leaf/member level: all content in remaining space
+      newNodes = layoutWithSigil(others, [backStrip, 0, 1 - backStrip, 1], level);
+    }
+  }
+
+  frame.nodes = backDoor ? [...newNodes, backDoor] : newNodes;
+  if (stackIndex === 0) level0Nodes = frame.nodes;
 }
 
 // ---------------------------------------------------------------------------
@@ -2947,6 +3062,11 @@ async function enterNode(node) {
 
   // Fetch metadata for the new level
   if (sigilActive) {
+    if (sigilVisual[frameLevel]) {
+      // Scores already cached — apply layout immediately
+      applySigilLayout(viewStack.length - 1);
+      fitOverview();
+    }
     fetchSigilScores(frameLevel);
   }
   fetchNodeLabels(frameLevel);
@@ -3154,6 +3274,7 @@ function exitToParent() {
     return;
   }
 
+  delete originalLayouts[viewStack.length - 1];
   viewStack.pop();
   fitOverview();
   updateBreadcrumb();
@@ -3162,6 +3283,7 @@ function exitToParent() {
 
 function popToLevel(stackIndex) {
   while (viewStack.length > stackIndex + 1) {
+    delete originalLayouts[viewStack.length - 1];
     viewStack.pop();
   }
   fitOverview();
@@ -3186,7 +3308,10 @@ function updateToolbarState() {
 
 function goHome() {
   if (viewStack.length <= 1) return;
-  while (viewStack.length > 1) viewStack.pop();
+  while (viewStack.length > 1) {
+    delete originalLayouts[viewStack.length - 1];
+    viewStack.pop();
+  }
   fitOverview();
   updateBreadcrumb();
   updateToolbarState();
@@ -3266,6 +3391,11 @@ function toggleSigil() {
   sigilActive = !sigilActive;
   if (sigilActive) {
     fetchSigilScores(currentLevel());
+  } else {
+    // Restore original layout on deactivation
+    const si = viewStack.length - 1;
+    restoreOriginalLayout(si);
+    fitOverview();
   }
   updateSigilIndicator();
   const btn = document.getElementById('toolbar-sigil');

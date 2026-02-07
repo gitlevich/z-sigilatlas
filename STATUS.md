@@ -1,8 +1,22 @@
 # Sigil Tree - Project Status
 
-## Current Phase: Post-Walk housekeeping complete (2026-02-07)
+## Current Phase: Phase 12 — Sigil-driven atlas reordering (COMPLETE, 2026-02-07)
 
-### What just happened — Dead flythrough code removal
+### What just happened — Sigil reorder implementation
+
+Branch `phase12-sigil-reorder`. All changes in `sigiltree/viewer_server.py` (client-side JS only).
+
+When sigil is toggled ON, the treemap physically rearranges: high-scoring nodes (aligned with taste)
+gravitate to center and grow larger; low-scoring nodes shrink and push to edges. Toggle OFF restores
+the original layout exactly.
+
+**New functions:** `saveOriginalLayout()`, `restoreOriginalLayout()`, `layoutWithSigil()`, `applySigilLayout()`
+**Weight formula:** `weight = baseSize * (0.5 + score)` where score is rank-stretched [0,1]. 3:1 ratio best-to-worst.
+**Modified:** `fetchSigilScores()`, `toggleSigil()`, `enterNode()`, `exitToParent()`, `popToLevel()`, `goHome()`
+
+All 181 tests pass. No Python changes.
+
+### Previous — Dead flythrough code removal
 
 Removed ~880 lines of dead flythrough code across 4 files:
 - `sigiltree/flythrough.py` — stripped to flow-graph functions only (`compute_flow_graph`, `flow_in_direction`, helpers). Removed: `FlythroughSession`, `infer_preferences`, `flythrough_to_sigil`, `_empty_sigil`, `MIN_VISITS`.
@@ -142,9 +156,10 @@ Atlas UI:
 - Justified row layout: `layoutAsGrid()` respects each tile's aspect ratio
 - Contain-fit rendering: `Math.min` scale, full image, no cropping
 
-### Pending Phase 12
-- User wants: "a switch in which this graph is going to be reconfigured by the taste sigil collected while exploring"
-- Sigil-reconfigured graph: after flythrough calibration, the graph reorders/reshapes based on inferred preferences
+### Backlog
+1. **Live sigil during calibration** — show taste sigil updating in real-time during walk (experimental featurette)
+2. **Categorical calibration** — tier-list UI for unipolar semantic categories (the 11 sem_ contrasts the walk excludes)
+3. **README / landing page** — explain the "neighborhood is a sigil" vision
 
 ## Phase 11: The Sigil Graph — No Leaves, No Dead Ends (COMPLETE)
 
