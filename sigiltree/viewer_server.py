@@ -3421,6 +3421,7 @@ canvas.addEventListener('click', (e) => {
 
 document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape') {
+    if (helpOverlay.classList.contains('active')) { hideHelp(); return; }
     exitToParent();
   } else if (e.key === '`' || e.key === 'F3') {
     debugMode = !debugMode;
