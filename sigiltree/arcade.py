@@ -418,6 +418,20 @@ def load_sigil(artifact_dir: Path, user_id: str = "default") -> dict | None:
     return json.loads(path.read_text())
 
 
+def delete_sigil(artifact_dir: Path, user_id: str = "default") -> None:
+    """Delete sigil, derived taste axis, and category prefs for a user."""
+    sigil_dir = artifact_dir / "sigils"
+    for name in [
+        f"sigil_{user_id}.json",
+        f"taste_axis_{user_id}.json",
+        f"categories_{user_id}.json",
+    ]:
+        path = sigil_dir / name
+        if path.exists():
+            path.unlink()
+            log.info("Deleted %s", path)
+
+
 # ---------------------------------------------------------------------------
 # Category preferences (radar-based filter)
 # ---------------------------------------------------------------------------

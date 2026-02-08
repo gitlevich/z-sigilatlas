@@ -2,20 +2,29 @@
 
 Current state snapshot for session resumption. See [JOURNAL.md](JOURNAL.md) for build history, [BACKLOG.md](BACKLOG.md) for planned work.
 
-## Current State (2026-02-07)
+## Current State (2026-02-08)
 
 Phase 20 on `master` branch. 244 tests pass. Server on port 8777.
 
 ### What just happened (this session)
 
-4. **Calibration onboarding text** (backlog item 4) — Added intro overlay to `/walk` page:
-   - Shows on first visit: explains what calibration does, how pairs represent visual contrasts, how to use slider
-   - Controls hint: arrow keys, slider, Space to skip, Esc to exit
-   - Dismisses on click or any keypress, then starts the walk
-   - Skipped on return visits via sessionStorage (`sigilatlas_walk_intro_seen`)
-   - Styled to match atlas help overlay pattern (dark overlay, centered card, `.intro-box`)
+8. **Taste radar on by default** — `tasteRadarVisible = true`, toolbar button starts with `active` class. Button always visible (removed hidden-until-data logic).
+
+9. **Taste axis pinned to north** — In unified radar, taste_axis is always at position 0 (north/top), remaining axes sorted for smooth polygon.
+
+10. **Reset clears everything** — `delete_sigil()` now also removes `categories_{user_id}.json`. After reset, sigil overlay returns 404 and doesn't alter layout.
 
 ### Previous session
+
+4. **Calibration onboarding** (backlog item 4) — Inline help panel on `/walk` with `?` toggle button. Shows on first visit.
+
+5. **Taste profile radar fix** — Labels now show winning pole names ("bright", "abstract", "wide") instead of contrast names with +/- suffixes. Added `_POLE_OVERRIDES` dict and `_pole_labels()` helper.
+
+6. **Unified radar** — Merged separate taste profile panel into the main atlas hover radar. One radar, two overlaid polygons: amber (taste, always visible when toggled) + blue (node, on hover). Same axes, same coordinate space, sorted for smooth shape. Taste dots orange/blue by direction, un-voted axes gray at midline.
+
+7. **Calibration reset button** — "reset" button top-right on `/walk` page. Calls `POST /api/walk/reset` to delete sigil + taste axis, then reloads. `delete_sigil()` added to `arcade.py`.
+
+### Older session
 
 1. **Categories integration** — categories-only mode, cache invalidation fix, 3 endpoint tests.
 2. **Sharper category gating** — cubed weights, reset button.
@@ -24,11 +33,11 @@ Phase 20 on `master` branch. 244 tests pass. Server on port 8777.
 ### What's live
 
 - **Atlas viewer** — 5-level treemap of 874 images in 960 nodes
-- **Calibration walk** (`/walk`) — Unified bias slider with arrow keys, onboarding intro overlay on first visit
+- **Calibration walk** (`/walk`) — Unified bias slider with arrow keys, onboarding help panel with `?` toggle, reset button
 - **Category filter** (`/categories`) — radar chart with 11 categories, reset button, cubed weights for sharp gating
 - **Sigil overlay** — toggle in toolbar. Dimming + golden halo. Categories button highlighted when filter active.
-- **Taste profile** — radar in atlas toolbar, now includes "taste" axis
-- **Taste axis** — materialized emergent contrast with per-image coordinates, z-summaries, exemplars
+- **Taste profile** — unified radar in atlas, on by default, taste_axis at north
+- **Taste axis** — materialized emergent contrast with per-image coordinates, z-summaries, exemplars, green/red dot
 - **Live at** https://sigilatlas.fly.dev/ (port 8777 locally)
 
 ### Scoring pipeline
@@ -50,7 +59,7 @@ Walk-only: gate = 1.0. Categories-only: walk_score = 0.5 * gate. Neither: 404.
 | `sigiltree/sigil_scoring.py` | `compute_sigil_scores()`, `compute_category_gate()` |
 | `sigiltree/taste_axis.py` | `compute_taste_coordinates()`, `materialize_taste_axis()` |
 | `sigiltree/walk.py` | Walk session logic |
-| `sigiltree/arcade.py` | Sigil persistence, category prefs, taste axis persistence |
+| `sigiltree/arcade.py` | Sigil persistence, category prefs, taste axis persistence, `delete_sigil()` |
 | `sigiltree/atlas.py` | Atlas build: clustering, treemap, tiles |
 
 ### Test files
@@ -81,6 +90,7 @@ fly deploy                                       # deploy to Fly.io
 ### Recent commits on master
 
 ```
-(pending) Calibration onboarding: intro overlay on first walk visit
+(pending) Radar UX: taste on by default, taste_axis north, full reset, button sync
+918938e Calibration walk: inline help panel with toggle button
 b308297 Unified walk+slider: signed bias replaces two-step side+strength flow
 ```
