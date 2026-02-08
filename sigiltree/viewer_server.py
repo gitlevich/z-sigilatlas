@@ -2284,7 +2284,14 @@ h1 { margin: 60px 0 6px; font-size: 22px; font-weight: 300; color: #ddd; }
   width: 100px; height: 100px; object-fit: cover;
   border-radius: 3px; background: #1a1a1a;
 }
-.save-zone { margin: 20px 0 40px; }
+.save-zone { margin: 20px 0 40px; display: flex; gap: 16px; justify-content: center; }
+.reset-btn {
+  background: rgba(170, 100, 70, 0.15); border: 1px solid #a86;
+  color: #a86; font-size: 15px; padding: 12px 30px;
+  border-radius: 22px; cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+.reset-btn:hover { background: rgba(170, 100, 70, 0.3); color: #ca8; }
 .save-btn {
   background: rgba(70, 170, 120, 0.15); border: 1px solid #4a8;
   color: #4a8; font-size: 15px; padding: 12px 40px;
@@ -2322,6 +2329,7 @@ h1 { margin: 60px 0 6px; font-size: 22px; font-weight: 300; color: #ddd; }
 </div>
 
 <div class="save-zone">
+  <button class="reset-btn" onclick="resetCategories()">Reset</button>
   <button class="save-btn" id="save-btn" onclick="saveCategories()">Save</button>
 </div>
 
@@ -2630,6 +2638,11 @@ async function saveCategories() {
     overlay.classList.add('visible');
     setTimeout(() => { window.location = '/atlas?sigil=1'; }, 1500);
   }
+}
+
+function resetCategories() {
+  for (const cid of Object.keys(weights)) weights[cid] = 0;
+  drawRadar();
 }
 
 window.addEventListener('resize', resizeCanvas);

@@ -200,6 +200,40 @@ class TestComputeCategoryGate:
         )
         assert abs(gates_with["n1"] - gates_without["n1"]) < 0.01
 
+    def test_maxed_category_dominates_over_low_others(self):
+        """When one category is at 100% and others near zero,
+        the gate must strongly separate matching vs non-matching nodes.
+        The same contrast coordinates that cluster images in the atlas
+        must drive the gate — portrait nodes bright, non-portrait nodes dim."""
+        lib = _make_contrast_library(
+            ["sem_portrait", "sem_landscape", "sem_architecture"]
+        )
+        nodes = _make_nodes(["portraits", "landscapes", "buildings"])
+        coords = _make_coordinates(lib, {
+            "portraits": {"sem_portrait": 0.9, "sem_landscape": 0.1, "sem_architecture": 0.1},
+            "landscapes": {"sem_portrait": 0.1, "sem_landscape": 0.9, "sem_architecture": 0.1},
+            "buildings": {"sem_portrait": 0.1, "sem_landscape": 0.1, "sem_architecture": 0.9},
+        })
+
+        # Portrait at 100%, others at ~15% (typical low handle position)
+        gates = compute_category_gate(
+            {"cat_000": 1.0, "cat_001": 0.15, "cat_002": 0.15},
+            lib, coords, nodes,
+        )
+        # Portrait node must be bright (gate > 0.8)
+        assert gates["portraits"] > 0.8, (
+            f"Portrait node gate {gates['portraits']:.3f} too low — "
+            "maxed category should dominate"
+        )
+        # Non-portrait nodes must be dim (gate < 0.2)
+        assert gates["landscapes"] < 0.2, (
+            f"Landscape node gate {gates['landscapes']:.3f} too high — "
+            "should be dimmed when portrait is maxed"
+        )
+        assert gates["buildings"] < 0.2, (
+            f"Building node gate {gates['buildings']:.3f} too high"
+        )
+
     def test_gate_range_zero_to_one(self):
         """All gate values should be in [0, 1]."""
         lib = _make_contrast_library(["sem_portrait", "sem_landscape", "sem_architecture"])

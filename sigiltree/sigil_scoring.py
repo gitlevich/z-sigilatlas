@@ -40,8 +40,10 @@ def compute_category_gate(
     if not category_weights:
         return {node["node_id"]: 1.0 for node in nodes}
 
-    # Filter to active categories (weight > 0)
-    active = {cid: w for cid, w in category_weights.items() if w > 0.01}
+    # Cube weights so low values vanish (0.13³ = 0.002) while high
+    # values stay strong (0.97³ = 0.91). Without this, many low-weight
+    # categories dilute the signal from the one the user cares about.
+    active = {cid: w ** 3 for cid, w in category_weights.items() if w > 0.01}
     if not active:
         return {node["node_id"]: 0.0 for node in nodes}
 
