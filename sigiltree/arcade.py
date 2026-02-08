@@ -450,6 +450,23 @@ def load_category_prefs(artifact_dir: Path, user_id: str = "default") -> dict | 
     return json.loads(path.read_text())
 
 
+def save_taste_axis(taste: dict, artifact_dir: Path, user_id: str = "default") -> Path:
+    """Save materialized taste axis data."""
+    sigil_dir = artifact_dir / "sigils"
+    sigil_dir.mkdir(exist_ok=True)
+    path = sigil_dir / f"taste_axis_{user_id}.json"
+    path.write_text(json.dumps(taste))
+    return path
+
+
+def load_taste_axis(artifact_dir: Path, user_id: str = "default") -> dict | None:
+    """Load materialized taste axis data."""
+    path = artifact_dir / "sigils" / f"taste_axis_{user_id}.json"
+    if not path.exists():
+        return None
+    return json.loads(path.read_text())
+
+
 # ---------------------------------------------------------------------------
 # Sigil strength profiling
 # ---------------------------------------------------------------------------

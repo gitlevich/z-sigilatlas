@@ -75,6 +75,7 @@ def create_app(artifact_dir: Path) -> web.Application:
     app.router.add_get("/api/atlas/neighborhood/{node_id}", handle_atlas_neighborhood)
     app.router.add_get("/api/atlas/sigil_scores", handle_atlas_sigil_scores)
     app.router.add_get("/api/atlas/taste_sigil", handle_atlas_taste_sigil)
+    app.router.add_get("/api/atlas/taste_axis", handle_taste_axis)
     app.router.add_get("/api/ride/stats", handle_ride_stats)  # z-summaries (kept)
     app.router.add_get("/api/atlas/flow_neighbors", handle_flow_neighbors)
     app.router.add_get("/api/atlas/node/{node_id}/doors", handle_atlas_node_doors)
@@ -240,9 +241,11 @@ async def handle_arcade_choose(request: web.Request) -> web.Response:
     # Auto-save sigil when complete
     if result["status"] == "complete":
         from sigiltree.arcade import save_sigil
+        from sigiltree.taste_axis import materialize_taste_axis
         artifact_dir = request.app["artifact_dir"]
         sigil = result["sigil"]
         save_sigil(sigil, artifact_dir)
+        materialize_taste_axis(sigil, artifact_dir)
 
     return web.json_response(result)
 
@@ -324,8 +327,10 @@ async def handle_walk_choose(request: web.Request) -> web.Response:
 
     if result["status"] == "complete":
         from sigiltree.arcade import save_sigil
+        from sigiltree.taste_axis import materialize_taste_axis
         artifact_dir = request.app["artifact_dir"]
         save_sigil(result["sigil"], artifact_dir)
+        materialize_taste_axis(result["sigil"], artifact_dir)
     elif direction in ("left", "right"):
         # Build partial sigil for live radar preview
         from sigiltree.arcade import build_sigil
@@ -611,6 +616,27 @@ async def handle_atlas_taste_sigil(request: web.Request) -> web.Response:
     })
 
 
+async def handle_taste_axis(request: web.Request) -> web.Response:
+    """Return the materialized taste axis metadata: exemplars, quantiles, components."""
+    from sigiltree.arcade import load_taste_axis
+
+    artifact_dir = request.app["artifact_dir"]
+    user_id = request.query.get("user_id", "default")
+
+    taste = load_taste_axis(artifact_dir, user_id)
+    if taste is None:
+        return web.json_response({"error": "No taste axis"}, status=404)
+
+    return web.json_response({
+        "contrast_id": taste.get("contrast_id", ""),
+        "name": taste.get("name", "taste_axis"),
+        "sigil_version": taste.get("sigil_version", ""),
+        "quantiles": taste.get("quantiles", {}),
+        "exemplars": taste.get("exemplars", {}),
+        "components": taste.get("components", []),
+    })
+
+
 async def handle_flow_neighbors(request: web.Request) -> web.Response:
     """Return flow-neighbor ordering for a node."""
     from sigiltree.ride_stats import load_ride_stats
@@ -847,6 +873,14 @@ async def handle_ride_stats(request: web.Request) -> web.Response:
 
     if level is not None:
         zsummaries = stats["zsummaries"].get(str(level), {})
+        # Merge taste axis z-summaries if materialized
+        from sigiltree.arcade import load_taste_axis
+        user_id = request.query.get("user_id", "default")
+        taste = load_taste_axis(artifact_dir, user_id)
+        if taste and "zsummaries" in taste:
+            level_taste_zs = taste["zsummaries"].get(str(level), {})
+            if level_taste_zs:
+                zsummaries["taste_axis"] = level_taste_zs
         return web.json_response({"level": int(level), "zsummaries": zsummaries, "correlations": stats["correlations"]})
 
     return web.json_response(stats)
@@ -2894,6 +2928,7 @@ const RADAR_AXES = [
   { key: 'sem_natural_vs_manmade',    label: 'manmade' },
   { key: 'sem_closeup_vs_wide',       label: 'wide' },
   { key: 'sem_abstract_vs_representational', label: 'repr.' },
+  { key: 'taste_axis',                     label: 'taste' },
 ];
 
 async function fetchZsummaries(level) {
