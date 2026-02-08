@@ -309,6 +309,7 @@ async def handle_walk_choose(request: web.Request) -> web.Response:
     body = await request.json()
     user_id = body.get("user_id", "default")
     direction = body.get("direction")
+    strength = body.get("strength", 1.0)
 
     if direction not in ("left", "right", "skip"):
         return web.json_response(
@@ -319,7 +320,7 @@ async def handle_walk_choose(request: web.Request) -> web.Response:
     if session is None:
         return web.json_response({"error": "No active walk session"}, status=404)
 
-    result = session.record_choice(direction)
+    result = session.record_choice(direction, strength=float(strength))
 
     if result["status"] == "complete":
         from sigiltree.arcade import save_sigil
@@ -1630,7 +1631,7 @@ body {
 .arena {
   flex: 1; display: flex; gap: 24px;
   align-items: center; justify-content: center;
-  padding: 24px 32px 12px;
+  padding: 24px 32px 4px;
 }
 .mosaic-col {
   flex: 1; display: flex; flex-direction: column;
@@ -1641,6 +1642,10 @@ body {
 }
 .mosaic-col:hover { border-color: #444; }
 .mosaic-col:hover .key-hint { color: #999; }
+.mosaic-col.chosen-left { border-color: #68f; background: rgba(100,130,255,0.08); }
+.mosaic-col.chosen-left .key-hint { color: #68f; }
+.mosaic-col.chosen-right { border-color: #f86; background: rgba(255,130,100,0.08); }
+.mosaic-col.chosen-right .key-hint { color: #f86; }
 .mosaic-col.flash-left { border-color: #68f; background: rgba(100,130,255,0.08); }
 .mosaic-col.flash-left .key-hint { color: #68f; }
 .mosaic-col.flash-right { border-color: #f86; background: rgba(255,130,100,0.08); }
@@ -1653,7 +1658,7 @@ body {
 .mosaic {
   width: 100%; display: grid;
   grid-template-columns: repeat(3, 1fr);
-  gap: 3px; max-width: 45vw; max-height: 76vh;
+  gap: 3px; max-width: 45vw; max-height: 62vh;
   border-radius: 8px;
   padding: 4px; position: relative;
   transition: opacity 0.2s;
@@ -1664,9 +1669,42 @@ body {
   background: #1a1a1a;
 }
 .mosaic.loading { opacity: 0.3; pointer-events: none; }
+/* Strength slider zone */
+#slider-zone {
+  display: none; padding: 8px 32px 4px;
+  flex-direction: column; align-items: center; gap: 4px;
+}
+#slider-zone.visible { display: flex; }
+#slider-zone .slider-row {
+  display: flex; align-items: center; gap: 12px; width: 100%; max-width: 500px;
+}
+#slider-zone .pole-label {
+  font-size: 11px; color: #666; width: 60px; text-align: center; flex-shrink: 0;
+}
+#slider-zone .pole-label.active-left { color: #68f; font-weight: 600; }
+#slider-zone .pole-label.active-right { color: #f86; font-weight: 600; }
+#strength-slider {
+  flex: 1; height: 6px; -webkit-appearance: none; appearance: none;
+  background: #333; border-radius: 3px; outline: none; cursor: pointer;
+}
+#strength-slider::-webkit-slider-thumb {
+  -webkit-appearance: none; width: 20px; height: 20px; border-radius: 50%;
+  background: #ccc; cursor: pointer; border: 2px solid #555;
+}
+#slider-zone .slider-hint {
+  font-size: 11px; color: #555; letter-spacing: 0.3px;
+}
+#confirm-btn {
+  background: rgba(255,255,255,0.08); border: 1px solid #666; color: #ccc;
+  font-size: 14px; padding: 8px 36px; border-radius: 18px;
+  cursor: pointer; transition: background 0.15s, border-color 0.15s, color 0.15s;
+  margin-top: 2px;
+}
+#confirm-btn:hover { background: rgba(255,255,255,0.15); border-color: #999; color: #fff; }
+/* Bottom controls */
 .skip-zone {
   display: flex; align-items: center; justify-content: center;
-  padding: 14px 0 6px;
+  padding: 10px 0 4px;
 }
 .skip-btn {
   background: rgba(255,255,255,0.05); border: 1px solid #555; color: #999;
@@ -1678,7 +1716,7 @@ body {
 .skip-btn .hint { font-size: 11px; color: #666; margin-left: 8px; }
 .progress-bar {
   display: flex; gap: 5px; justify-content: center;
-  padding: 12px 24px 20px; flex-wrap: wrap;
+  padding: 8px 24px 14px; flex-wrap: wrap;
 }
 .dot {
   width: 7px; height: 7px; border-radius: 50%; background: #282828;
@@ -1729,8 +1767,8 @@ body {
 .exit-btn:hover { color: #ccc; border-color: #888; }
 .exit-btn .hint { font-size: 11px; color: #555; margin-left: 6px; }
 @media (max-width: 700px) {
-  .arena { flex-direction: column; gap: 12px; padding: 12px 16px 8px; }
-  .mosaic { max-width: 90vw; max-height: 36vh; }
+  .arena { flex-direction: column; gap: 12px; padding: 12px 16px 4px; }
+  .mosaic { max-width: 90vw; max-height: 30vh; }
   .key-hint { font-size: 14px; }
 }
 </style>
@@ -1740,17 +1778,26 @@ body {
 <button class="exit-btn" onclick="window.location='/atlas'">exit <span class="hint">[Esc]</span></button>
 <div id="contrast-label"></div>
 <div class="arena">
-  <div class="mosaic-col" onclick="choose('left')">
+  <div class="mosaic-col" id="col-left" onclick="selectSide('left')">
     <div id="mosaic-left" class="mosaic loading"></div>
     <div class="key-hint">&larr;</div>
   </div>
-  <div class="mosaic-col" onclick="choose('right')">
+  <div class="mosaic-col" id="col-right" onclick="selectSide('right')">
     <div id="mosaic-right" class="mosaic loading"></div>
     <div class="key-hint">&rarr;</div>
   </div>
 </div>
-<div class="skip-zone">
-  <button class="skip-btn" onclick="choose('skip')">skip <span class="hint">[Space]</span></button>
+<div id="slider-zone">
+  <div class="slider-row">
+    <div class="pole-label" id="pole-left"></div>
+    <input type="range" id="strength-slider" min="-100" max="100" value="0">
+    <div class="pole-label" id="pole-right"></div>
+  </div>
+  <div class="slider-hint">[Enter] to confirm &nbsp; [Esc] to cancel</div>
+  <button id="confirm-btn" onclick="confirmChoice()">next</button>
+</div>
+<div class="skip-zone" id="skip-zone">
+  <button class="skip-btn" onclick="doSkip()">skip <span class="hint">[Space]</span></button>
 </div>
 <div id="progress" class="progress-bar"></div>
 <canvas id="sigil-radar" width="220" height="220"></canvas>
@@ -1766,20 +1813,22 @@ let totalSteps = 0;
 let stepIndex = 0;
 let choosing = false;
 
+// Signed bias: -1.0 (strong left) .. 0 (neutral) .. +1.0 (strong right)
+let bias = 0;
+let pendingDirection = null;  // derived from sign of bias
+
 // Live progress pie state
-let radarContrasts = [];   // [{id, name}] — all bipolar contrasts
-let sigilEntries = {};     // {contrast_id: {name, dir, str}} from partial_sigil
-let animValues = {};       // {contrast_id: current_animated_value}
-let skippedIds = new Set(); // contrast IDs that were skipped
+let radarContrasts = [];
+let sigilEntries = {};
+let animValues = {};
+let skippedIds = new Set();
 let radarCtx = null;
 const RADAR_SIZE = 220;
 const RADAR_PAD = 40;
 
 function formatContrastName(name) {
-  // sem_abstract_vs_representational -> abstract / representational
   let s = name.replace(/^sem_/, '').replace(/^pca_/, '');
   s = s.replace(/_vs_/g, ' / ').replace(/_/g, ' ');
-  // Abbreviate long names
   if (s.length > 14) {
     const parts = s.split(' / ');
     if (parts.length === 2) {
@@ -1802,8 +1851,6 @@ function drawProgressPie() {
   const sliceAngle = (2 * Math.PI - n * sliceGap) / n;
 
   radarCtx.clearRect(0, 0, RADAR_SIZE, RADAR_SIZE);
-
-  // Alphabetical sort for stable layout
   const ordered = [...radarContrasts].sort((a, b) => a.name.localeCompare(b.name));
 
   for (let i = 0; i < n; i++) {
@@ -1812,7 +1859,6 @@ function drawProgressPie() {
     const endAngle = startAngle + sliceAngle;
     const entry = sigilEntries[c.id];
 
-    // Donut slice
     radarCtx.beginPath();
     radarCtx.arc(cx, cy, outerR, startAngle, endAngle);
     radarCtx.arc(cx, cy, innerR, endAngle, startAngle, true);
@@ -1828,12 +1874,10 @@ function drawProgressPie() {
       radarCtx.fillStyle = '#1a1a1a';
     }
     radarCtx.fill();
-
     radarCtx.strokeStyle = '#333';
     radarCtx.lineWidth = 0.5;
     radarCtx.stroke();
 
-    // Label at midpoint of slice, outside the ring
     const midAngle = (startAngle + endAngle) / 2;
     const labelR = outerR + 8;
     const lx = cx + Math.cos(midAngle) * labelR;
@@ -1842,10 +1886,7 @@ function drawProgressPie() {
     radarCtx.save();
     radarCtx.translate(lx, ly);
     let textAngle = midAngle;
-    // Flip text on left side for readability
-    if (midAngle > Math.PI / 2 || midAngle < -Math.PI / 2) {
-      textAngle += Math.PI;
-    }
+    if (midAngle > Math.PI / 2 || midAngle < -Math.PI / 2) textAngle += Math.PI;
     radarCtx.rotate(textAngle);
     radarCtx.font = '7px system-ui, sans-serif';
     radarCtx.textAlign = (midAngle > Math.PI / 2 || midAngle < -Math.PI / 2) ? 'right' : 'left';
@@ -1868,7 +1909,6 @@ function animateSigilUpdate(newEntries) {
   for (const c of radarContrasts) {
     targets[c.id] = newEntries[c.id] ? 1.0 : (animValues[c.id] || 0);
   }
-
   const startVals = {...animValues};
   const startTime = performance.now();
   const duration = 400;
@@ -1909,6 +1949,16 @@ async function startWalk() {
 
 async function showStep(step) {
   currentStep = step;
+  bias = 0;
+  pendingDirection = null;
+  // Reset slider zone
+  document.getElementById('slider-zone').classList.remove('visible');
+  document.getElementById('skip-zone').style.display = '';
+  document.getElementById('strength-slider').value = 0;
+  // Clear column highlights
+  document.getElementById('col-left').classList.remove('chosen-left', 'flash-left');
+  document.getElementById('col-right').classList.remove('chosen-right', 'flash-right');
+
   const label = document.getElementById('contrast-label');
   if (step.contrast_name) {
     label.textContent = formatContrastName(step.contrast_name);
@@ -1922,7 +1972,6 @@ async function showStep(step) {
   ml.classList.add('loading');
   mr.classList.add('loading');
 
-  // Build image elements
   const leftImgs = step.left_ids.map(id => {
     const img = new Image();
     img.src = `/thumbs/256/${id}.jpg`;
@@ -1938,7 +1987,6 @@ async function showStep(step) {
     return img;
   });
 
-  // Wait for all images to load
   const allImgs = [...leftImgs, ...rightImgs];
   await Promise.all(allImgs.map(img =>
     new Promise(resolve => {
@@ -1956,70 +2004,170 @@ async function showStep(step) {
   mr.classList.remove('loading');
 }
 
-async function choose(direction) {
+const BIAS_STEP = 0.10;   // per arrow keypress
+const BIAS_INITIAL = 0.50; // first press lands here
+
+function poleNames() {
+  // Extract pole names from contrast_name like "sem_warm_vs_cool" → ["low", "high"]
+  // Then align with visual layout: if flipped, left shows high and right shows low
+  if (!currentStep || !currentStep.contrast_name) return ['less', 'more'];
+  let s = currentStep.contrast_name.replace(/^sem_/, '').replace(/^pca_/, '');
+  const parts = s.split('_vs_');
+  let low, high;
+  if (parts.length === 2) {
+    [low, high] = parts.map(p => p.replace(/_/g, ' '));
+  } else {
+    const label = s.replace(/_/g, ' ');
+    low = 'less ' + label;
+    high = 'more ' + label;
+  }
+  if (currentStep.flipped) return [high, low];
+  return [low, high];
+}
+
+function applyBias(newBias) {
+  bias = Math.max(-1, Math.min(1, newBias));
+
+  const leftCol = document.getElementById('col-left');
+  const rightCol = document.getElementById('col-right');
+  leftCol.classList.remove('chosen-left', 'chosen-right');
+  rightCol.classList.remove('chosen-left', 'chosen-right');
+
+  const slider = document.getElementById('strength-slider');
+  const sliderZone = document.getElementById('slider-zone');
+  const skipZone = document.getElementById('skip-zone');
+
+  // Always show pole names on slider endpoints
+  const [leftName, rightName] = poleNames();
+  document.getElementById('pole-left').textContent = leftName;
+  document.getElementById('pole-right').textContent = rightName;
+
+  if (Math.abs(bias) < 0.001) {
+    pendingDirection = null;
+    sliderZone.classList.remove('visible');
+    skipZone.style.display = '';
+    return;
+  }
+
+  pendingDirection = bias < 0 ? 'left' : 'right';
+
+  if (pendingDirection === 'left') {
+    leftCol.classList.add('chosen-left');
+  } else {
+    rightCol.classList.add('chosen-right');
+  }
+
+  slider.value = Math.round(bias * 100);
+
+  sliderZone.classList.add('visible');
+  skipZone.style.display = 'none';
+
+  // Highlight the active pole label
+  const poleLeft = document.getElementById('pole-left');
+  const poleRight = document.getElementById('pole-right');
+  poleLeft.className = 'pole-label';
+  poleRight.className = 'pole-label';
+  if (pendingDirection === 'left') {
+    poleLeft.classList.add('active-left');
+  } else {
+    poleRight.classList.add('active-right');
+  }
+}
+
+function selectSide(direction) {
   if (choosing || !currentStep) return;
+  if (direction === 'left') {
+    applyBias(-BIAS_INITIAL);
+  } else {
+    applyBias(BIAS_INITIAL);
+  }
+}
+
+function doSkip() {
+  if (choosing || !currentStep) return;
+  sendChoice('skip', 0);
+}
+
+async function confirmChoice() {
+  if (choosing || !pendingDirection) return;
+  const strength = Math.abs(bias);
+  await sendChoice(pendingDirection, strength);
+}
+
+async function sendChoice(direction, strength) {
+  if (choosing) return;
   choosing = true;
 
-  // Flash animation on the whole column
-  const leftCol = document.getElementById('mosaic-left').parentElement;
-  const rightCol = document.getElementById('mosaic-right').parentElement;
+  const leftCol = document.getElementById('col-left');
+  const rightCol = document.getElementById('col-right');
+
+  // Brief flash
   if (direction === 'left') {
     leftCol.classList.add('flash-left');
   } else if (direction === 'right') {
     rightCol.classList.add('flash-right');
   }
 
-  const r = await fetch('/api/walk/choose', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({user_id: 'default', direction}),
-  });
-  const data = await r.json();
+  try {
+    const r = await fetch('/api/walk/choose', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({user_id: 'default', direction, strength}),
+    });
+    const data = await r.json();
 
-  // Clear flash
-  setTimeout(() => {
-    leftCol.classList.remove('flash-left');
-    rightCol.classList.remove('flash-right');
-  }, 250);
+    setTimeout(() => {
+      leftCol.classList.remove('flash-left', 'chosen-left');
+      rightCol.classList.remove('flash-right', 'chosen-right');
+    }, 200);
 
-  // Track skipped contrasts
-  if (direction === 'skip' && currentStep && currentStep.contrast_name) {
-    const match = radarContrasts.find(c => c.name === currentStep.contrast_name);
-    if (match) {
-      skippedIds.add(match.id);
-      drawProgressPie();
+    // Track skipped contrasts
+    if (direction === 'skip' && currentStep && currentStep.contrast_name) {
+      const match = radarContrasts.find(c => c.name === currentStep.contrast_name);
+      if (match) {
+        skippedIds.add(match.id);
+        drawProgressPie();
+      }
     }
-  }
 
-  // Update progress pie
-  const countEl = document.getElementById('sigil-count');
-  const collapsedCount = data.partial_sigil ? data.partial_sigil.collapsed_count : Object.keys(sigilEntries).length;
-  countEl.textContent = `${collapsedCount} / ${radarContrasts.length} tastes`;
-  countEl.classList.add('visible');
+    // Update progress pie
+    const countEl = document.getElementById('sigil-count');
+    const collapsedCount = data.partial_sigil ? data.partial_sigil.collapsed_count : Object.keys(sigilEntries).length;
+    countEl.textContent = `${collapsedCount} / ${radarContrasts.length} tastes`;
+    countEl.classList.add('visible');
 
-  if (data.partial_sigil && data.partial_sigil.collapsed_count > 0) {
-    animateSigilUpdate(data.partial_sigil.entries);
-  }
+    if (data.partial_sigil && data.partial_sigil.collapsed_count > 0) {
+      animateSigilUpdate(data.partial_sigil.entries);
+    }
 
-  if (data.status === 'complete') {
-    const collapsed = data.sigil ? data.sigil.collapsed_count : 0;
-    document.getElementById('done-msg').textContent = 'Preferences recorded.';
-    document.getElementById('done-detail').textContent =
-      collapsed > 0
-        ? `${collapsed} taste${collapsed > 1 ? 's' : ''} calibrated. Returning to atlas...`
-        : 'No strong preferences detected. Returning to atlas...';
-    document.getElementById('done-overlay').classList.add('visible');
-    // Fill all remaining dots
-    renderProgress({current: totalSteps, total: totalSteps, choices_made: totalSteps});
-    setTimeout(() => { window.location = '/atlas?sigil=1'; }, 1800);
-  } else if (data.step) {
-    totalSteps = data.progress.total;
-    stepIndex = data.progress.current;
-    renderProgress(data.progress);
-    await showStep(data.step);
+    if (data.status === 'complete') {
+      const collapsed = data.sigil ? data.sigil.collapsed_count : 0;
+      document.getElementById('done-msg').textContent = 'Preferences recorded.';
+      document.getElementById('done-detail').textContent =
+        collapsed > 0
+          ? `${collapsed} taste${collapsed > 1 ? 's' : ''} calibrated. Returning to atlas...`
+          : 'No strong preferences detected. Returning to atlas...';
+      document.getElementById('done-overlay').classList.add('visible');
+      renderProgress({current: totalSteps, total: totalSteps, choices_made: totalSteps});
+      setTimeout(() => { window.location = '/atlas?sigil=1'; }, 1800);
+    } else if (data.step) {
+      totalSteps = data.progress.total;
+      stepIndex = data.progress.current;
+      renderProgress(data.progress);
+      await showStep(data.step);
+    }
+  } catch (err) {
+    console.error('sendChoice failed:', err);
+  } finally {
+    choosing = false;
   }
-  choosing = false;
 }
+
+// Slider live update
+document.getElementById('strength-slider').addEventListener('input', function() {
+  const newBias = parseInt(this.value, 10) / 100;
+  applyBias(newBias);
+});
 
 function renderProgress(progress) {
   const bar = document.getElementById('progress');
@@ -2036,13 +2184,37 @@ function renderProgress(progress) {
 // Keyboard controls
 document.addEventListener('keydown', e => {
   if (e.key === 'ArrowLeft' || e.key === 'a' || e.key === 'A') {
-    e.preventDefault(); choose('left');
+    e.preventDefault();
+    if (choosing || !currentStep) return;
+    if (bias === 0) {
+      applyBias(-BIAS_INITIAL);
+    } else {
+      applyBias(bias - BIAS_STEP);
+    }
   } else if (e.key === 'ArrowRight' || e.key === 'd' || e.key === 'D') {
-    e.preventDefault(); choose('right');
+    e.preventDefault();
+    if (choosing || !currentStep) return;
+    if (bias === 0) {
+      applyBias(BIAS_INITIAL);
+    } else {
+      applyBias(bias + BIAS_STEP);
+    }
+  } else if (e.key === 'Enter') {
+    e.preventDefault();
+    if (pendingDirection) {
+      confirmChoice();
+    }
   } else if (e.key === ' ' || e.key === 'ArrowUp') {
-    e.preventDefault(); choose('skip');
+    e.preventDefault();
+    if (!pendingDirection) {
+      doSkip();
+    }
   } else if (e.key === 'Escape') {
-    window.location = '/atlas';
+    if (pendingDirection) {
+      applyBias(0);
+    } else {
+      window.location = '/atlas';
+    }
   }
 });
 

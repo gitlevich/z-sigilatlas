@@ -43,6 +43,7 @@ class Choice:
     is_repeat: bool
     timestamp: float
     presentation_index: int
+    strength: float = 1.0   # user-provided strength from slider [0, 1]
 
 
 @dataclass
@@ -307,7 +308,11 @@ def build_sigil(choices: list[Choice], library_version: str, user_id: str) -> di
     """Build a sigil from a sequence of choices.
 
     Only left/right choices produce entries. Center produces nothing.
-    Inconsistent repeats (direction disagreement) decay or drop the contrast.
+
+    Strength resolution:
+      - If any choice carries an explicit slider strength (< 1.0), use the
+        mean of slider-provided strengths for the winning direction.
+      - Otherwise fall back to agreement-ratio logic for repeat consistency.
     """
     # Group choices by contrast
     by_contrast: dict[str, list[Choice]] = {}
@@ -327,9 +332,7 @@ def build_sigil(choices: list[Choice], library_version: str, user_id: str) -> di
         unique_dirs = set(directions)
 
         if len(unique_dirs) == 1:
-            # Consistent: full strength
             direction = directions[0]
-            strength = 1.0
             n_agreements = len(directions)
         else:
             # Inconsistent: check majority
@@ -337,11 +340,9 @@ def build_sigil(choices: list[Choice], library_version: str, user_id: str) -> di
             right_count = directions.count("right")
 
             if left_count == right_count:
-                # Perfect disagreement: drop this contrast (cooled)
                 log.info("Contrast %s cooled: equal left/right disagreement", cid)
                 continue
 
-            # Majority wins but with decayed strength
             if left_count > right_count:
                 direction = "left"
                 n_agreements = left_count
@@ -352,11 +353,26 @@ def build_sigil(choices: list[Choice], library_version: str, user_id: str) -> di
             total = len(directions)
             agreement_ratio = n_agreements / total
             if agreement_ratio < 0.5:
-                # Below majority: drop
                 log.info("Contrast %s cooled: agreement ratio %.2f < 0.5", cid, agreement_ratio)
                 continue
 
-            strength = agreement_ratio  # Decay proportional to disagreement
+        # Determine strength: prefer explicit slider values when present
+        winning = [c for c in directional if c.direction == direction]
+        slider_strengths = [c.strength for c in winning if c.strength < 1.0]
+
+        if slider_strengths:
+            # User provided explicit slider strength(s) — use mean
+            strength = sum(slider_strengths) / len(slider_strengths)
+        elif len(unique_dirs) == 1:
+            # Consistent direction, no slider → full strength
+            strength = 1.0
+        else:
+            # Inconsistent repeats without slider → agreement ratio decay
+            strength = n_agreements / len(directions)
+
+        # Drop near-zero slider strengths
+        if strength < 0.01:
+            continue
 
         contrast_name = directional[0].contrast_name
 
@@ -364,7 +380,7 @@ def build_sigil(choices: list[Choice], library_version: str, user_id: str) -> di
             contrast_id=cid,
             contrast_name=contrast_name,
             direction=direction,
-            strength=strength,
+            strength=round(strength, 4),
             n_presentations=len(contrast_choices),
             n_agreements=n_agreements,
         ))
@@ -432,3 +448,45 @@ def load_category_prefs(artifact_dir: Path, user_id: str = "default") -> dict | 
     if not path.exists():
         return None
     return json.loads(path.read_text())
+
+
+# ---------------------------------------------------------------------------
+# Sigil strength profiling
+# ---------------------------------------------------------------------------
+
+def update_sigil_strengths(sigil: dict, strengths: dict[str, float]) -> dict:
+    """Update strength values in an existing sigil from detail profiling.
+
+    Only updates entries that exist in the sigil. Strengths are clamped
+    to [0, 1]. Entries with strength 0 are removed (user doesn't care).
+
+    Args:
+        sigil: Existing sigil dict (not mutated).
+        strengths: {contrast_id: float} — new strength values from sliders.
+
+    Returns:
+        New sigil dict with updated strengths and recalculated metadata.
+    """
+    updated = json.loads(json.dumps(sigil))  # deep copy
+    entries = updated.get("entries", {})
+
+    for cid, strength in strengths.items():
+        if cid not in entries:
+            continue
+        clamped = max(0.0, min(1.0, strength))
+        if clamped < 0.01:
+            # Effectively zero — remove this contrast
+            del entries[cid]
+        else:
+            entries[cid]["strength"] = round(clamped, 4)
+
+    updated["entries"] = entries
+    updated["collapsed_count"] = len(entries)
+    updated["profiled"] = True
+
+    # Recompute version hash
+    updated["version"] = (
+        f"sigil_v1_{hashlib.md5(json.dumps(entries, sort_keys=True).encode()).hexdigest()[:8]}"
+    )
+
+    return updated

@@ -181,11 +181,13 @@ class WalkSession:
 
     # -- Choice recording ----------------------------------------------------
 
-    def record_choice(self, direction: str) -> dict:
-        """Record a binary choice and advance.
+    def record_choice(self, direction: str, strength: float = 1.0) -> dict:
+        """Record a choice and advance.
 
         Args:
             direction: "left", "right", or "skip"
+            strength: slider-provided strength [0, 1]. Default 1.0
+                      (backward-compatible with pure binary walk).
 
         Returns:
             dict with "status" ("continue" or "complete") and next step or sigil.
@@ -203,6 +205,9 @@ class WalkSession:
         # Map "skip" to "center" for build_sigil() compatibility
         sigil_direction = "center" if effective_direction == "skip" else effective_direction
 
+        # Clamp strength
+        clamped_strength = max(0.0, min(1.0, strength))
+
         contrast_name = self._contrast_name(step.contrast_id)
         choice = Choice(
             contrast_id=step.contrast_id,
@@ -211,6 +216,7 @@ class WalkSession:
             is_repeat=step.is_repeat,
             timestamp=time.time(),
             presentation_index=step.step_index,
+            strength=clamped_strength,
         )
         self.choices.append(choice)
         self.current_index += 1
@@ -300,4 +306,5 @@ class WalkSession:
             "is_repeat": step.is_repeat,
             "step_index": step.step_index,
             "contrast_name": self._contrast_name(step.contrast_id),
+            "flipped": step.flipped,
         }

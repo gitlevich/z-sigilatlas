@@ -15,6 +15,7 @@ from sigiltree.arcade import (
     build_sigil,
     save_sigil,
     load_sigil,
+    update_sigil_strengths,
 )
 
 
@@ -279,3 +280,145 @@ def test_max_repeats_per_contrast():
         # First presentation + max 2 repeats = max 3 total
         assert count <= 1 + ArcadeSession.MAX_REPEATS_PER_CONTRAST, \
             f"Contrast {cid} shown {count} times (max {1 + ArcadeSession.MAX_REPEATS_PER_CONTRAST})"
+
+
+# ---------------------------------------------------------------------------
+# Slider-provided strength in build_sigil
+# ---------------------------------------------------------------------------
+
+def test_slider_strength_used_in_sigil():
+    """When choices carry explicit slider strength, sigil uses it."""
+    choices = [
+        Choice("c1", "test_c1", "right", False, time.time(), 0, strength=0.6),
+    ]
+    sigil = build_sigil(choices, "v1", "test")
+    assert "c1" in sigil["entries"]
+    assert sigil["entries"]["c1"]["strength"] == 0.6
+
+
+def test_slider_zero_strength_drops_contrast():
+    """Slider strength of 0 drops the contrast from sigil."""
+    choices = [
+        Choice("c1", "test_c1", "left", False, time.time(), 0, strength=0.0),
+    ]
+    sigil = build_sigil(choices, "v1", "test")
+    assert "c1" not in sigil["entries"]
+    assert sigil["collapsed_count"] == 0
+
+
+def test_slider_strength_with_repeats_averages():
+    """Multiple slider strengths for same contrast are averaged."""
+    choices = [
+        Choice("c1", "test_c1", "right", False, time.time(), 0, strength=0.4),
+        Choice("c1", "test_c1", "right", True, time.time(), 1, strength=0.8),
+    ]
+    sigil = build_sigil(choices, "v1", "test")
+    assert "c1" in sigil["entries"]
+    assert abs(sigil["entries"]["c1"]["strength"] - 0.6) < 0.01
+
+
+def test_default_strength_backward_compatible():
+    """Choices without explicit slider (strength=1.0) still produce full strength."""
+    choices = [
+        Choice("c1", "test_c1", "left", False, time.time(), 0),
+    ]
+    sigil = build_sigil(choices, "v1", "test")
+    assert "c1" in sigil["entries"]
+    assert sigil["entries"]["c1"]["strength"] == 1.0
+
+
+# ---------------------------------------------------------------------------
+# Sigil strength profiling tests
+# ---------------------------------------------------------------------------
+
+def _make_profiling_sigil():
+    """Create a sigil suitable for profiling tests."""
+    return {
+        "version": "sigil_v1_abc12345",
+        "contrast_library_version": "v1_test",
+        "user_id": "test",
+        "created_at": 1000000.0,
+        "entries": {
+            "c1": {
+                "contrast_id": "c1",
+                "contrast_name": "sharpness",
+                "direction": "right",
+                "strength": 1.0,
+                "n_presentations": 2,
+                "n_agreements": 2,
+            },
+            "c2": {
+                "contrast_id": "c2",
+                "contrast_name": "contrast",
+                "direction": "left",
+                "strength": 1.0,
+                "n_presentations": 1,
+                "n_agreements": 1,
+            },
+            "c3": {
+                "contrast_id": "c3",
+                "contrast_name": "brightness",
+                "direction": "right",
+                "strength": 0.67,
+                "n_presentations": 3,
+                "n_agreements": 2,
+            },
+        },
+        "total_choices": 6,
+        "collapsed_count": 3,
+        "superposed_count": 1,
+    }
+
+
+def test_update_sigil_strengths_basic():
+    """Update strengths correctly for existing entries."""
+    sigil = _make_profiling_sigil()
+    updated = update_sigil_strengths(sigil, {"c1": 0.7, "c2": 0.3})
+    assert updated["entries"]["c1"]["strength"] == 0.7
+    assert updated["entries"]["c2"]["strength"] == 0.3
+    # c3 unchanged
+    assert updated["entries"]["c3"]["strength"] == 0.67
+    assert updated["profiled"] is True
+
+
+def test_update_sigil_strengths_ignores_unknown_ids():
+    """Unknown contrast IDs are silently ignored."""
+    sigil = _make_profiling_sigil()
+    updated = update_sigil_strengths(sigil, {"c1": 0.5, "unknown_id": 0.9})
+    assert updated["entries"]["c1"]["strength"] == 0.5
+    assert "unknown_id" not in updated["entries"]
+    assert updated["collapsed_count"] == 3
+
+
+def test_update_sigil_strengths_clamps_range():
+    """Strengths are clamped to [0, 1]."""
+    sigil = _make_profiling_sigil()
+    updated = update_sigil_strengths(sigil, {"c1": 1.5, "c2": -0.3})
+    assert updated["entries"]["c1"]["strength"] == 1.0
+    # c2 was -0.3, clamped to 0.0 then < 0.01, so removed
+    assert "c2" not in updated["entries"]
+    assert updated["collapsed_count"] == 2
+
+
+def test_update_sigil_strengths_zero_removes():
+    """Setting strength to 0 removes the contrast."""
+    sigil = _make_profiling_sigil()
+    updated = update_sigil_strengths(sigil, {"c1": 0.0})
+    assert "c1" not in updated["entries"]
+    assert updated["collapsed_count"] == 2
+
+
+def test_update_sigil_strengths_does_not_mutate_original():
+    """Original sigil dict is not modified."""
+    sigil = _make_profiling_sigil()
+    original_strength = sigil["entries"]["c1"]["strength"]
+    update_sigil_strengths(sigil, {"c1": 0.5})
+    assert sigil["entries"]["c1"]["strength"] == original_strength
+
+
+def test_update_sigil_strengths_recomputes_version():
+    """Version hash changes when strengths change."""
+    sigil = _make_profiling_sigil()
+    updated = update_sigil_strengths(sigil, {"c1": 0.5})
+    assert updated["version"] != sigil["version"]
+    assert updated["version"].startswith("sigil_v1_")

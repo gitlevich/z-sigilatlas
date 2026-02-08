@@ -1,5 +1,7 @@
 """Tests for Calibration Walk: two-tile binary preference elicitation."""
 
+import json
+
 import pytest
 
 from sigiltree.walk import (
@@ -573,3 +575,84 @@ class TestTasteSigilEndpoint:
             assert data["entries"]["aaa"]["name"] == "sharpness"
             assert data["entries"]["aaa"]["dir"] == "left"
             assert data["entries"]["aaa"]["str"] == 0.85
+
+
+# ---------------------------------------------------------------------------
+# TestWalkSliderStrength
+# ---------------------------------------------------------------------------
+
+class TestWalkSliderStrength:
+    """Tests for combined walk+slider strength flow."""
+
+    def test_slider_strength_propagates_to_choice(self):
+        """Walk session records the slider strength in the Choice."""
+        lib = _make_walk_library(n_bipolar=2, n_unipolar=0, n_pca=0)
+        session = WalkSession(lib)
+        session.record_choice("right", strength=0.7)
+        assert session.choices[0].strength == 0.7
+
+    def test_default_strength_is_one(self):
+        """Without slider, strength defaults to 1.0 (backward compatible)."""
+        lib = _make_walk_library(n_bipolar=2, n_unipolar=0, n_pca=0)
+        session = WalkSession(lib)
+        session.record_choice("left")
+        assert session.choices[0].strength == 1.0
+
+    def test_slider_strength_in_sigil(self):
+        """Slider-provided strength appears in the built sigil."""
+        lib = _make_walk_library(n_bipolar=2, n_unipolar=0, n_pca=0)
+        session = WalkSession(lib)
+        session.record_choice("right", strength=0.6)
+        session.record_choice("left", strength=0.3)
+        # Exhaust any repeats
+        while not session.is_complete:
+            session.record_choice("skip")
+        sigil = build_sigil(session.choices, session.library_version, session.user_id)
+        # Both entries should have slider-provided strengths
+        for entry in sigil["entries"].values():
+            assert entry["strength"] in (0.6, 0.3)
+
+    def test_skip_has_zero_strength(self):
+        """Skip passes strength 0 and produces no sigil entry."""
+        lib = _make_walk_library(n_bipolar=1, n_unipolar=0, n_pca=0)
+        session = WalkSession(lib)
+        session.record_choice("skip", strength=0)
+        sigil = build_sigil(session.choices, session.library_version, session.user_id)
+        assert sigil["collapsed_count"] == 0
+
+    def test_strength_clamped_to_range(self):
+        """Strength values are clamped to [0, 1]."""
+        lib = _make_walk_library(n_bipolar=2, n_unipolar=0, n_pca=0)
+        session = WalkSession(lib)
+        session.record_choice("right", strength=1.5)
+        assert session.choices[0].strength == 1.0
+        session.record_choice("left", strength=-0.3)
+        assert session.choices[1].strength == 0.0
+
+    def test_zero_strength_drops_contrast(self):
+        """Strength 0.0 from slider drops the contrast from sigil."""
+        lib = _make_walk_library(n_bipolar=1, n_unipolar=0, n_pca=0)
+        session = WalkSession(lib)
+        session.record_choice("right", strength=0.0)
+        while not session.is_complete:
+            session.record_choice("skip")
+        sigil = build_sigil(session.choices, session.library_version, session.user_id)
+        assert sigil["collapsed_count"] == 0
+
+    def test_mixed_slider_and_default_strengths(self):
+        """Mix of slider and default strengths in same sigil."""
+        lib = _make_walk_library(n_bipolar=3, n_unipolar=0, n_pca=0)
+        session = WalkSession(lib)
+        session.record_choice("right", strength=0.4)   # slider
+        session.record_choice("left")                    # default 1.0
+        session.record_choice("right", strength=0.8)    # slider
+        while not session.is_complete:
+            session.record_choice("skip")
+        sigil = build_sigil(session.choices, session.library_version, session.user_id)
+        strengths = sorted([e["strength"] for e in sigil["entries"].values()])
+        assert 0.4 in strengths
+        assert 0.8 in strengths
+        assert 1.0 in strengths
+
+
+
