@@ -8,9 +8,11 @@ PCA as a conditional extension.
 Reuses arcade.py's Choice dataclass and build_sigil() for sigil collapse.
 """
 
+import json
 import logging
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, asdict
+from pathlib import Path
 
 import numpy as np
 
@@ -301,6 +303,7 @@ class WalkSession:
     def step_to_dict(self, step: WalkStep) -> dict:
         """Serialize step for JSON response."""
         return {
+            "contrast_id": step.contrast_id,
             "left_ids": step.left_ids,
             "right_ids": step.right_ids,
             "is_repeat": step.is_repeat,
@@ -308,3 +311,55 @@ class WalkSession:
             "contrast_name": self._contrast_name(step.contrast_id),
             "flipped": step.flipped,
         }
+
+    def save_progress(self, artifact_dir: Path) -> None:
+        """Persist walk choices to disk for resume after reload."""
+        sigil_dir = artifact_dir / "sigils"
+        sigil_dir.mkdir(exist_ok=True)
+        path = sigil_dir / f"walk_progress_{self.user_id}.json"
+        data = {
+            "user_id": self.user_id,
+            "library_version": self.library_version,
+            "current_index": self.current_index,
+            "choices": [asdict(c) for c in self.choices],
+        }
+        path.write_text(json.dumps(data, indent=2))
+
+    def restore_progress(self, artifact_dir: Path) -> bool:
+        """Restore walk choices from disk. Returns True if restored."""
+        path = artifact_dir / "sigils" / f"walk_progress_{self.user_id}.json"
+        if not path.exists():
+            return False
+        try:
+            data = json.loads(path.read_text())
+        except (json.JSONDecodeError, OSError):
+            return False
+        if data.get("library_version") != self.library_version:
+            log.info("Walk progress version mismatch, starting fresh")
+            return False
+        saved_choices = data.get("choices", [])
+        saved_index = data.get("current_index", 0)
+        if saved_index >= len(self.steps) or saved_index < 0:
+            return False
+        # Replay choices into session to restore state
+        self.choices = [Choice(**c) for c in saved_choices]
+        self.current_index = saved_index
+        # Replay phase transitions
+        if self.current_index >= self._bipolar_count and not self._repeats_scheduled:
+            self._schedule_bipolar_repeats()
+            self._repeats_scheduled = True
+        if (self.current_index >= len(self.steps)
+                and self._repeats_scheduled
+                and not self._pca_decided):
+            self._maybe_extend_with_pca()
+            self._pca_decided = True
+        log.info("Restored walk progress: %d/%d steps", saved_index, len(self.steps))
+        return True
+
+
+def delete_walk_progress(artifact_dir: Path, user_id: str = "default") -> None:
+    """Remove saved walk progress file."""
+    path = artifact_dir / "sigils" / f"walk_progress_{user_id}.json"
+    if path.exists():
+        path.unlink()
+        log.info("Deleted walk progress: %s", path)

@@ -279,7 +279,9 @@ async def handle_sigil_api(request: web.Request) -> web.Response:
 
 
 async def handle_walk_page(request: web.Request) -> web.Response:
-    return web.Response(text=WALK_HTML, content_type="text/html")
+    resp = web.Response(text=WALK_HTML, content_type="text/html")
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
 
 
 async def handle_walk_start(request: web.Request) -> web.Response:
@@ -294,19 +296,60 @@ async def handle_walk_start(request: web.Request) -> web.Response:
 
     library = json.loads(lib_path.read_text())
     session = WalkSession(library, user_id=user_id)
+    session.restore_progress(artifact_dir)
     request.app["walk_sessions"][user_id] = session
 
     step = session.current_step
-    bipolar_info = [
-        {"id": c["contrast_id"], "name": c["name"]}
-        for c in session.bipolars
-    ]
-    return web.json_response({
+    bipolar_info = []
+    for c in session.bipolars:
+        low, high = _pole_labels(c["name"])
+        bipolar_info.append({
+            "id": c["contrast_id"],
+            "name": c["name"],
+            "low": low,
+            "high": high,
+        })
+    resp_data = {
         "status": "started",
         "step": session.step_to_dict(step) if step else None,
         "progress": session.progress,
         "contrasts": bipolar_info,
-    })
+    }
+
+    # If restored from saved progress, include partial sigil for radar
+    if session.choices:
+        from sigiltree.arcade import build_sigil
+        partial = build_sigil(
+            session.choices, session.library_version, session.user_id
+        )
+        if partial["collapsed_count"] > 0:
+            ps_entries = {}
+            for cid, e in partial["entries"].items():
+                low, high = _pole_labels(e["contrast_name"])
+                winning = high if e["direction"] == "right" else low
+                ps_entries[cid] = {
+                    "name": e["contrast_name"],
+                    "dir": e["direction"],
+                    "str": e["strength"],
+                    "low": low,
+                    "high": high,
+                    "pole": winning,
+                }
+            resp_data["partial_sigil"] = {
+                "entries": ps_entries,
+                "collapsed_count": partial["collapsed_count"],
+            }
+        # Also include which contrasts were skipped
+        skipped_cids = []
+        seen_cids = set()
+        for c in session.choices:
+            if c.direction == "center" and c.contrast_id not in seen_cids:
+                skipped_cids.append(c.contrast_id)
+            seen_cids.add(c.contrast_id)
+        if skipped_cids:
+            resp_data["skipped_ids"] = skipped_cids
+
+    return web.json_response(resp_data)
 
 
 async def handle_walk_choose(request: web.Request) -> web.Response:
@@ -325,13 +368,15 @@ async def handle_walk_choose(request: web.Request) -> web.Response:
         return web.json_response({"error": "No active walk session"}, status=404)
 
     result = session.record_choice(direction, strength=float(strength))
+    artifact_dir = request.app["artifact_dir"]
 
     if result["status"] == "complete":
         from sigiltree.arcade import save_sigil
         from sigiltree.taste_axis import materialize_taste_axis
-        artifact_dir = request.app["artifact_dir"]
+        from sigiltree.walk import delete_walk_progress
         save_sigil(result["sigil"], artifact_dir)
         materialize_taste_axis(result["sigil"], artifact_dir)
+        delete_walk_progress(artifact_dir, user_id)
     elif direction in ("left", "right"):
         # Build partial sigil for live radar preview
         from sigiltree.arcade import build_sigil
@@ -339,17 +384,26 @@ async def handle_walk_choose(request: web.Request) -> web.Response:
             session.choices, session.library_version, session.user_id
         )
         if partial["collapsed_count"] > 0:
+            ps_entries = {}
+            for cid, e in partial["entries"].items():
+                low, high = _pole_labels(e["contrast_name"])
+                winning = high if e["direction"] == "right" else low
+                ps_entries[cid] = {
+                    "name": e["contrast_name"],
+                    "dir": e["direction"],
+                    "str": e["strength"],
+                    "low": low,
+                    "high": high,
+                    "pole": winning,
+                }
             result["partial_sigil"] = {
-                "entries": {
-                    cid: {
-                        "name": e["contrast_name"],
-                        "dir": e["direction"],
-                        "str": e["strength"],
-                    }
-                    for cid, e in partial["entries"].items()
-                },
+                "entries": ps_entries,
                 "collapsed_count": partial["collapsed_count"],
             }
+
+    # Persist progress after every choice (for reload resilience)
+    if result["status"] != "complete":
+        session.save_progress(artifact_dir)
 
     return web.json_response(result)
 
@@ -357,17 +411,21 @@ async def handle_walk_choose(request: web.Request) -> web.Response:
 async def handle_walk_reset(request: web.Request) -> web.Response:
     """Delete the user's sigil and taste axis, allowing a fresh calibration."""
     from sigiltree.arcade import delete_sigil
+    from sigiltree.walk import delete_walk_progress
 
     artifact_dir = request.app["artifact_dir"]
     user_id = "default"
     delete_sigil(artifact_dir, user_id)
+    delete_walk_progress(artifact_dir, user_id)
     # Clear cached stats so stale taste axis doesn't linger
     request.app["_stats_cache"] = {}
     return web.json_response({"status": "ok"})
 
 
 async def handle_categories_page(request: web.Request) -> web.Response:
-    return web.Response(text=CATEGORIES_HTML, content_type="text/html")
+    resp = web.Response(text=CATEGORIES_HTML, content_type="text/html")
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
 
 
 async def handle_categories_data(request: web.Request) -> web.Response:
@@ -434,7 +492,9 @@ async def handle_categories_save(request: web.Request) -> web.Response:
 
 
 async def handle_atlas_page(request: web.Request) -> web.Response:
-    return web.Response(text=ATLAS_VIEWER_HTML, content_type="text/html")
+    resp = web.Response(text=ATLAS_VIEWER_HTML, content_type="text/html")
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
 
 
 async def handle_atlas_meta(request: web.Request) -> web.Response:
@@ -657,8 +717,10 @@ async def handle_atlas_taste_sigil(request: web.Request) -> web.Response:
             "pole": winning,
         }
 
+    sorted_cids = sorted(entries.keys(), key=lambda c: entries[c]["str"], reverse=True)
     resp = web.json_response({
         "entries": entries,
+        "sorted_keys": sorted_cids,
         "collapsed_count": len(entries),
         "total_choices": sigil.get("total_choices", 0),
     })
@@ -1854,8 +1916,8 @@ body {
 #help-panel .controls-hint { color: #666; }
 #help-panel .controls-hint span { color: #888; }
 #sigil-radar {
-  position: fixed; bottom: 24px; right: 16px;
-  width: 220px; height: 220px;
+  position: fixed; bottom: 50px; right: 16px;
+  width: 340px; height: 340px;
   border-radius: 8px; background: rgba(17,17,17,0.95);
   border: 1px solid #333;
   opacity: 0; transition: opacity 0.6s ease;
@@ -1863,13 +1925,19 @@ body {
 }
 #sigil-radar.visible { opacity: 1; }
 #sigil-count {
-  position: fixed; bottom: 6px; right: 16px;
-  width: 220px; text-align: center;
+  position: fixed; bottom: 30px; right: 16px;
+  width: 340px; text-align: center;
   font-size: 11px; color: #777; letter-spacing: 0.5px;
   opacity: 0; transition: opacity 0.6s ease;
   pointer-events: none; z-index: 20;
 }
 #sigil-count.visible { opacity: 1; }
+#sigil-legend {
+  position: fixed; bottom: 10px; right: 16px;
+  width: 340px; text-align: center;
+  font-size: 10px; color: #666; letter-spacing: 0.3px;
+  pointer-events: none; z-index: 20;
+}
 #contrast-label {
   position: fixed; top: 14px; left: 0; right: 0;
   text-align: center; z-index: 10;
@@ -1929,8 +1997,9 @@ body {
   <button class="skip-btn" onclick="doSkip()">skip <span class="hint">[Space]</span></button>
 </div>
 <div id="progress" class="progress-bar"></div>
-<canvas id="sigil-radar" width="220" height="220"></canvas>
+<canvas id="sigil-radar" width="340" height="340"></canvas>
 <div id="sigil-count"></div>
+<div id="sigil-legend"><span style="color:#ffa800">orange</span> = right pole &nbsp;&middot;&nbsp; <span style="color:#68a8ff">blue</span> = left pole &nbsp;&middot;&nbsp; <span style="color:#666">gray</span> = uncalibrated</div>
 <div id="help-panel">
   <p>Pairs of image mosaics, each representing opposite ends of a visual contrast. Pick the side you prefer, then set how strongly you feel. The atlas learns your taste and highlights matching neighborhoods.</p>
   <div class="controls-hint">
@@ -1955,14 +2024,16 @@ let choosing = false;
 let bias = 0;
 let pendingDirection = null;  // derived from sign of bias
 
-// Live progress pie state
+// Live radar state
 let radarContrasts = [];
 let sigilEntries = {};
-let animValues = {};
 let skippedIds = new Set();
 let radarCtx = null;
-const RADAR_SIZE = 220;
-const RADAR_PAD = 40;
+// Live preview: shows current slider position on radar before submit
+let livePreview = null;  // {cid, dir, str} or null
+let currentContrastId = null;  // contrast_id of current step
+const RADAR_SIZE = 340;
+const RADAR_PAD = 55;
 
 function formatContrastName(name) {
   let s = name.replace(/^sem_/, '').replace(/^pca_/, '');
@@ -1978,92 +2049,157 @@ function formatContrastName(name) {
   return s;
 }
 
-function drawProgressPie() {
+// Build axis list for radar. STABLE ORDER: same order as radarContrasts
+// (from server), never re-sorted. Avoids rotation on updates.
+// Overlays livePreview for the current contrast being adjusted.
+function buildWalkRadarAxes() {
+  const axes = [];
+  for (const c of radarContrasts) {
+    // Live preview overrides the current contrast's display
+    const isLive = livePreview && livePreview.cid === c.id;
+    const entry = isLive ? livePreview : sigilEntries[c.id];
+    const isCurrent = currentContrastId === c.id;
+    axes.push({
+      key: c.name,
+      cid: c.id,
+      low: c.low || '',
+      high: c.high || '',
+      tasteDir: entry ? entry.dir : null,
+      tasteStr: entry ? entry.str : 0,
+      pole: entry ? (entry.pole || (entry.dir === 'right' ? (c.high || c.name) : (c.low || c.name))) : '',
+      skipped: skippedIds.has(c.id),
+      isCurrent: isCurrent,
+      isLive: isLive,
+    });
+  }
+  return axes;  // stable server order — no sorting
+}
+
+function drawTasteRadar() {
   if (!radarCtx || radarContrasts.length === 0) return;
-  const n = radarContrasts.length;
-  const cx = RADAR_SIZE / 2;
-  const cy = RADAR_SIZE / 2;
-  const outerR = cx - RADAR_PAD;
-  const innerR = outerR * 0.52;
-  const sliceGap = 0.02;
-  const sliceAngle = (2 * Math.PI - n * sliceGap) / n;
+  const dpr = window.devicePixelRatio || 1;
+  const axes = buildWalkRadarAxes();
+  const n = axes.length;
+  const w = RADAR_SIZE;
+  const cx = w / 2;
+  const cy = w / 2;
+  const radius = cx - RADAR_PAD;
+  const angleStep = (2 * Math.PI) / n;
+  const startA = -Math.PI / 2;
 
-  radarCtx.clearRect(0, 0, RADAR_SIZE, RADAR_SIZE);
-  const ordered = [...radarContrasts].sort((a, b) => a.name.localeCompare(b.name));
+  // Handle HiDPI
+  const canvas = radarCtx.canvas;
+  if (canvas.width !== w * dpr) {
+    canvas.width = w * dpr;
+    canvas.height = w * dpr;
+    canvas.style.width = w + 'px';
+    canvas.style.height = w + 'px';
+    radarCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  }
+  radarCtx.clearRect(0, 0, w, w);
 
-  for (let i = 0; i < n; i++) {
-    const c = ordered[i];
-    const startAngle = -Math.PI / 2 + i * (sliceAngle + sliceGap);
-    const endAngle = startAngle + sliceAngle;
-    const entry = sigilEntries[c.id];
-
+  // Grid rings
+  radarCtx.strokeStyle = 'rgba(255,255,255,0.08)';
+  radarCtx.lineWidth = 0.5;
+  for (const frac of [0.25, 0.5, 0.75, 1.0]) {
     radarCtx.beginPath();
-    radarCtx.arc(cx, cy, outerR, startAngle, endAngle);
-    radarCtx.arc(cx, cy, innerR, endAngle, startAngle, true);
-    radarCtx.closePath();
+    radarCtx.arc(cx, cy, radius * frac, 0, 2 * Math.PI);
+    radarCtx.stroke();
+  }
+  // Half-strength ring
+  radarCtx.strokeStyle = 'rgba(255,255,255,0.15)';
+  radarCtx.beginPath();
+  radarCtx.arc(cx, cy, radius * 0.5, 0, 2 * Math.PI);
+  radarCtx.stroke();
 
-    const opacity = animValues[c.id] || 0;
-    if (entry && opacity > 0.01) {
-      const baseColor = entry.dir === 'right' ? [255, 168, 0] : [104, 168, 255];
-      radarCtx.fillStyle = `rgba(${baseColor.join(',')}, ${0.15 + opacity * 0.55})`;
-    } else if (skippedIds.has(c.id)) {
-      radarCtx.fillStyle = '#282828';
+  // Spokes
+  radarCtx.strokeStyle = 'rgba(255,255,255,0.06)';
+  for (let i = 0; i < n; i++) {
+    const angle = startA + i * angleStep;
+    radarCtx.beginPath();
+    radarCtx.moveTo(cx, cy);
+    radarCtx.lineTo(cx + Math.cos(angle) * radius, cy + Math.sin(angle) * radius);
+    radarCtx.stroke();
+  }
+
+  // Per-axis radius: un-voted/skipped at midline (0.5).
+  // Voted axes map strength [0,1] to radius [0.5, 1.0] — above the midline.
+  function axisR(i) {
+    if (!axes[i].tasteDir) return 0.5 * radius;  // un-voted or skipped
+    return (0.5 + axes[i].tasteStr * 0.5) * radius;
+  }
+
+  // Amber taste polygon
+  const hasTaste = axes.some(a => a.tasteStr > 0);
+  if (hasTaste) {
+    radarCtx.beginPath();
+    for (let i = 0; i < n; i++) {
+      const angle = startA + i * angleStep;
+      const r = axisR(i);
+      const x = cx + Math.cos(angle) * r;
+      const y = cy + Math.sin(angle) * r;
+      if (i === 0) radarCtx.moveTo(x, y); else radarCtx.lineTo(x, y);
+    }
+    radarCtx.closePath();
+    radarCtx.fillStyle = 'rgba(255,168,0,0.12)';
+    radarCtx.fill();
+    radarCtx.strokeStyle = 'rgba(255,168,0,0.5)';
+    radarCtx.lineWidth = 1.5;
+    radarCtx.stroke();
+  }
+
+  // Dots
+  for (let i = 0; i < n; i++) {
+    const angle = startA + i * angleStep;
+    const r = axisR(i);
+    const x = cx + Math.cos(angle) * r;
+    const y = cy + Math.sin(angle) * r;
+    radarCtx.beginPath();
+    radarCtx.arc(x, y, axes[i].skipped ? 5 : 4, 0, 2 * Math.PI);
+    if (axes[i].tasteDir === 'right') {
+      radarCtx.fillStyle = '#ffa800';
+    } else if (axes[i].tasteDir === 'left') {
+      radarCtx.fillStyle = '#68a8ff';
+    } else if (axes[i].skipped) {
+      radarCtx.fillStyle = 'rgba(128,128,128,0.6)';
     } else {
-      radarCtx.fillStyle = '#1a1a1a';
+      radarCtx.fillStyle = 'rgba(128,128,128,0.25)';
     }
     radarCtx.fill();
-    radarCtx.strokeStyle = '#333';
-    radarCtx.lineWidth = 0.5;
-    radarCtx.stroke();
+  }
 
-    const midAngle = (startAngle + endAngle) / 2;
-    const labelR = outerR + 8;
-    const lx = cx + Math.cos(midAngle) * labelR;
-    const ly = cy + Math.sin(midAngle) * labelR;
+  // Labels — larger font, better positioning
+  radarCtx.font = '10px system-ui, sans-serif';
+  radarCtx.textBaseline = 'middle';
+  for (let i = 0; i < n; i++) {
+    const angle = startA + i * angleStep;
+    const labelDist = radius + 16;
+    const lx = cx + Math.cos(angle) * labelDist;
+    const ly = cy + Math.sin(angle) * labelDist;
+    if (Math.abs(Math.cos(angle)) < 0.3) radarCtx.textAlign = 'center';
+    else if (Math.cos(angle) > 0) radarCtx.textAlign = 'left';
+    else radarCtx.textAlign = 'right';
 
-    radarCtx.save();
-    radarCtx.translate(lx, ly);
-    let textAngle = midAngle;
-    if (midAngle > Math.PI / 2 || midAngle < -Math.PI / 2) textAngle += Math.PI;
-    radarCtx.rotate(textAngle);
-    radarCtx.font = '7px system-ui, sans-serif';
-    radarCtx.textAlign = (midAngle > Math.PI / 2 || midAngle < -Math.PI / 2) ? 'right' : 'left';
-    radarCtx.textBaseline = 'middle';
-
-    if (entry) {
-      radarCtx.fillStyle = entry.dir === 'right' ? 'rgba(255,168,0,0.7)' : 'rgba(104,168,255,0.7)';
-    } else if (skippedIds.has(c.id)) {
+    if (axes[i].tasteDir === 'right') {
+      radarCtx.fillStyle = 'rgba(255,168,0,0.85)';
+    } else if (axes[i].tasteDir === 'left') {
+      radarCtx.fillStyle = 'rgba(104,168,255,0.85)';
+    } else if (axes[i].skipped) {
       radarCtx.fillStyle = 'rgba(255,255,255,0.35)';
     } else {
       radarCtx.fillStyle = 'rgba(255,255,255,0.2)';
     }
-    radarCtx.fillText(formatContrastName(c.name), 0, 0);
-    radarCtx.restore();
+    const label = axes[i].pole || formatContrastName(axes[i].key);
+    radarCtx.fillText(label, lx, ly);
   }
 }
 
 function animateSigilUpdate(newEntries) {
-  const targets = {};
-  for (const c of radarContrasts) {
-    targets[c.id] = newEntries[c.id] ? 1.0 : (animValues[c.id] || 0);
+  // Merge new entries into existing ones (preserves prior calibration state)
+  for (const [cid, entry] of Object.entries(newEntries)) {
+    sigilEntries[cid] = entry;
   }
-  const startVals = {...animValues};
-  const startTime = performance.now();
-  const duration = 400;
-
-  function tick(now) {
-    const t = Math.min(1.0, (now - startTime) / duration);
-    const ease = t * (2 - t);
-    for (const c of radarContrasts) {
-      const from = startVals[c.id] || 0;
-      const to = targets[c.id] || 0;
-      animValues[c.id] = from + (to - from) * ease;
-    }
-    sigilEntries = newEntries;
-    drawProgressPie();
-    if (t < 1.0) requestAnimationFrame(tick);
-  }
-  requestAnimationFrame(tick);
+  drawTasteRadar();
 }
 
 async function startWalk() {
@@ -2075,10 +2211,40 @@ async function startWalk() {
   const data = await r.json();
   if (data.status === 'started' && data.step) {
     totalSteps = data.progress.total;
-    stepIndex = 0;
+    stepIndex = data.progress.current;
     radarContrasts = data.contrasts || [];
     radarCtx = document.getElementById('sigil-radar').getContext('2d');
-    drawProgressPie();
+
+    // Restore partial sigil from server (includes saved progress)
+    if (data.partial_sigil && data.partial_sigil.entries) {
+      sigilEntries = data.partial_sigil.entries;
+    }
+    // Restore skipped contrasts
+    if (data.skipped_ids) {
+      for (const cid of data.skipped_ids) skippedIds.add(cid);
+    }
+
+    // Also load existing completed taste sigil (for prior full calibration)
+    try {
+      const ts = await fetch('/api/atlas/taste_sigil?user_id=default');
+      if (ts.ok) {
+        const tsData = await ts.json();
+        // Merge: restored partial entries take precedence over completed sigil
+        const completed = tsData.entries || {};
+        for (const [cid, entry] of Object.entries(completed)) {
+          if (!sigilEntries[cid]) sigilEntries[cid] = entry;
+        }
+      }
+    } catch (e) { /* no prior sigil — fine */ }
+
+    const countEl = document.getElementById('sigil-count');
+    const entryCount = Object.keys(sigilEntries).length;
+    if (entryCount > 0) {
+      countEl.textContent = entryCount + ' / ' + radarContrasts.length + ' tastes';
+      countEl.classList.add('visible');
+    }
+
+    drawTasteRadar();
     document.getElementById('sigil-radar').classList.add('visible');
     renderProgress(data.progress);
     await showStep(data.step);
@@ -2089,6 +2255,13 @@ async function showStep(step) {
   currentStep = step;
   bias = 0;
   pendingDirection = null;
+  livePreview = null;
+  // Set currentContrastId for live radar preview
+  currentContrastId = step.contrast_id || null;
+  if (!currentContrastId && step.contrast_name) {
+    const match = radarContrasts.find(c => c.name === step.contrast_name);
+    if (match) currentContrastId = match.id;
+  }
   // Reset slider zone
   document.getElementById('slider-zone').classList.remove('visible');
   document.getElementById('skip-zone').style.display = '';
@@ -2182,8 +2355,10 @@ function applyBias(newBias) {
 
   if (Math.abs(bias) < 0.001) {
     pendingDirection = null;
+    livePreview = null;
     sliderZone.classList.remove('visible');
     skipZone.style.display = '';
+    drawTasteRadar();
     return;
   }
 
@@ -2210,6 +2385,18 @@ function applyBias(newBias) {
   } else {
     poleRight.classList.add('active-right');
   }
+
+  // Live radar preview: show current slider position
+  if (currentContrastId) {
+    const c = radarContrasts.find(r => r.id === currentContrastId);
+    if (c) {
+      const dir = bias < 0 ? 'left' : 'right';
+      const str = Math.abs(bias);
+      const pole = dir === 'right' ? (c.high || c.name) : (c.low || c.name);
+      livePreview = { cid: c.id, dir, str, pole };
+      drawTasteRadar();
+    }
+  }
 }
 
 function selectSide(direction) {
@@ -2235,6 +2422,7 @@ async function confirmChoice() {
 async function sendChoice(direction, strength) {
   if (choosing) return;
   choosing = true;
+  livePreview = null;  // clear live preview before submitting
 
   const leftCol = document.getElementById('col-left');
   const rightCol = document.getElementById('col-right');
@@ -2264,7 +2452,7 @@ async function sendChoice(direction, strength) {
       const match = radarContrasts.find(c => c.name === currentStep.contrast_name);
       if (match) {
         skippedIds.add(match.id);
-        drawProgressPie();
+        drawTasteRadar();
       }
     }
 
@@ -2459,7 +2647,7 @@ h1 { margin: 60px 0 6px; font-size: 22px; font-weight: 300; color: #ddd; }
 
 <button class="exit-btn" onclick="window.location='/atlas'">exit <span class="hint">[Esc]</span></button>
 <h1>Category Filter</h1>
-<p class="subtitle">Pull handles outward to include categories. Center = hidden.</p>
+<p class="subtitle">Pull handles past the midline to include categories. Inside midline = off.</p>
 
 <div class="radar-container">
   <canvas id="radar-canvas"></canvas>
@@ -2518,6 +2706,20 @@ function axisEndpoint(i, r) {
   return [centerX + Math.cos(a) * r, centerY + Math.sin(a) * r];
 }
 
+// Map raw weight [0,1] to visual radius fraction [0,1].
+// Weights <= 0.5 are inactive (collapsed to center).
+// Weights > 0.5 extend from center to edge: 0.5 -> 0, 1.0 -> 1.
+function visualFrac(val) {
+  if (val <= 0.5) return 0;
+  return (val - 0.5) * 2.0;
+}
+
+// Effective filter strength as percentage: 0.5 -> 0%, 1.0 -> 100%
+function effectivePct(val) {
+  if (val <= 0.5) return 0;
+  return Math.round((val - 0.5) * 200);
+}
+
 function drawRadar() {
   const w = canvas.width / (window.devicePixelRatio || 1);
   const h = canvas.height / (window.devicePixelRatio || 1);
@@ -2526,7 +2728,7 @@ function drawRadar() {
   if (categories.length === 0) return;
   const n = categories.length;
 
-  // Guide rings
+  // Guide rings at 33%, 66%, 100% of effective range
   for (const frac of [0.33, 0.66, 1.0]) {
     ctx.beginPath();
     for (let i = 0; i <= n; i++) {
@@ -2551,11 +2753,11 @@ function drawRadar() {
     ctx.stroke();
   }
 
-  // Filled polygon
+  // Filled polygon (using effective visual fraction)
   ctx.beginPath();
   for (let i = 0; i < n; i++) {
     const val = weights[categories[i].contrast_id] || 0;
-    const [x, y] = axisEndpoint(i, radius * val);
+    const [x, y] = axisEndpoint(i, radius * visualFrac(val));
     if (i === 0) ctx.moveTo(x, y);
     else ctx.lineTo(x, y);
   }
@@ -2569,10 +2771,11 @@ function drawRadar() {
   // Handles (dots on axes)
   for (let i = 0; i < n; i++) {
     const val = weights[categories[i].contrast_id] || 0;
-    const [hx, hy] = axisEndpoint(i, radius * val);
+    const active = val > 0.5;
+    const [hx, hy] = axisEndpoint(i, radius * visualFrac(val));
     ctx.beginPath();
     ctx.arc(hx, hy, i === hoveredAxis ? 7 : 5, 0, Math.PI * 2);
-    ctx.fillStyle = val > 0.01 ? '#4a8' : '#444';
+    ctx.fillStyle = active ? '#4a8' : '#444';
     ctx.fill();
     if (i === hoveredAxis) {
       ctx.strokeStyle = '#6c6';
@@ -2588,12 +2791,14 @@ function drawRadar() {
   for (let i = 0; i < n; i++) {
     const [lx, ly] = axisEndpoint(i, radius + 30);
     const val = weights[categories[i].contrast_id] || 0;
-    ctx.fillStyle = i === hoveredAxis ? '#ccc' : (val > 0.01 ? '#999' : '#555');
+    const active = val > 0.5;
+    const pct = effectivePct(val);
+    ctx.fillStyle = i === hoveredAxis ? '#ccc' : (active ? '#999' : '#555');
     ctx.fillText(categories[i].display_name, lx, ly);
-    if (val > 0.01) {
+    if (active) {
       ctx.fillStyle = '#4a8';
       ctx.font = '10px system-ui, sans-serif';
-      ctx.fillText(Math.round(val * 100) + '%', lx, ly + 14);
+      ctx.fillText(pct + '%', lx, ly + 14);
       ctx.font = '12px system-ui, sans-serif';
     }
   }
@@ -2634,7 +2839,11 @@ function projectOnAxis(mx, my, axisIdx) {
   const dx = Math.cos(a), dy = Math.sin(a);
   const pmx = mx - centerX, pmy = my - centerY;
   const proj = pmx * dx + pmy * dy;
-  return Math.max(0, Math.min(1, proj / radius));
+  // Visual radius maps to effective range [0.5, 1.0].
+  // Center (proj<=0) = 0.5 (neutral, excluded from gate).
+  // Edge (proj=radius) = 1.0 (max filter strength).
+  const frac = Math.max(0, Math.min(1, proj / radius));
+  return 0.5 + frac * 0.5;
 }
 
 // Mouse events
@@ -2690,7 +2899,7 @@ canvas.addEventListener('dblclick', e => {
   const my = e.clientY - rect.top;
   const axis = findClosestAxis(mx, my);
   if (axis >= 0) {
-    weights[categories[axis].contrast_id] = 0;
+    weights[categories[axis].contrast_id] = 0.5;
     drawRadar();
   }
 });
@@ -2787,7 +2996,7 @@ async function saveCategories() {
 }
 
 function resetCategories() {
-  for (const cid of Object.keys(weights)) weights[cid] = 0;
+  for (const cid of Object.keys(weights)) weights[cid] = 0.5;
   drawRadar();
 }
 
@@ -3005,20 +3214,10 @@ let nodeLabels = {};        // {level: {node_id: string}}
 
 // Z-summaries for radar chart: {level: {contrast: {node_id: {z_mean, z_std, n}}}}
 let nodeZsummaries = {};
-// Radar axes: curated subset of contrasts for the radar chart
-const RADAR_AXES = [
-  { key: 'brightness',                label: 'bright' },
-  { key: 'temperature',               label: 'warm' },
-  { key: 'sharpness',                 label: 'sharp' },
-  { key: 'saturation',                label: 'saturated' },
-  { key: 'contrast',                  label: 'contrast' },
-  { key: 'texture_scale',             label: 'coarse' },
-  { key: 'sem_simple_vs_complex',     label: 'complex' },
-  { key: 'sem_natural_vs_manmade',    label: 'manmade' },
-  { key: 'sem_closeup_vs_wide',       label: 'wide' },
-  { key: 'sem_abstract_vs_representational', label: 'repr.' },
-  { key: 'taste_axis',                     label: 'taste' },
-];
+// Radar axes: built dynamically from taste sigil data in fetchTasteSigil().
+// Each entry: { key, label, tasteDir, tasteStr, low, high }
+// taste_axis is prepended at index 0 (north).
+let radarAxes = [];
 
 async function fetchZsummaries(level) {
   if (nodeZsummaries[level]) return;
@@ -3589,16 +3788,16 @@ function draw() {
 // ---------------------------------------------------------------------------
 
 function drawRadar(node) {
-  const hasTaste = Object.keys(tasteSigilByAxis).length > 0;
-  const n = RADAR_AXES.length;
+  if (radarAxes.length === 0) return;  // no sigil = no radar
+  const hasTaste = radarAxes.some(a => a.tasteStr > 0);
+  const n = radarAxes.length;
 
-  // Build per-axis data
-  const items = RADAR_AXES.map(axis => {
-    // Taste value for this axis
-    const te = tasteSigilByAxis[axis.key];
-    const tasteVal = te ? tasteRadarVal(te) : 0;
-    const tasteDir = te ? te.dir : null;
-    const tastePole = te ? te.pole : null;
+  // Build per-axis data from dynamic radarAxes
+  const items = radarAxes.map(axis => {
+    // Taste value directly from axis (set during fetchTasteSigil)
+    const tasteVal = axis.tasteStr || 0.5;  // un-voted = midline
+    const tasteDir = axis.tasteDir;
+    const tastePole = axis.label;
 
     // Node z-summary value for this axis
     let nodeVal = null;
@@ -4614,26 +4813,34 @@ if (!sessionStorage.getItem('sigilatlas_help_seen')) {
 // Taste sigil radar panel
 // ---------------------------------------------------------------------------
 let tasteRadarVisible = true;
-let tasteRadarData = null;  // {entries: {cid: {name, dir, str, pole}}, collapsed_count}
-let tasteSigilByAxis = {};  // {axisKey: {dir, str, pole, low, high}}
-
-function tasteRadarVal(entry) {
-  // Magnitude only: center=0 (no preference), edge=1 (max strength).
-  // Direction is shown by dot color (orange=right, blue=left).
-  return entry.str;
-}
+let tasteRadarData = null;  // {entries: {cid: {name, dir, str, pole}}, sorted_keys, collapsed_count}
 
 async function fetchTasteSigil() {
   try {
     const r = await fetch('/api/atlas/taste_sigil?user_id=default');
-    if (!r.ok) return false;
+    if (!r.ok) { radarAxes = []; return false; }
     tasteRadarData = await r.json();
-    tasteSigilByAxis = {};
-    for (const e of Object.values(tasteRadarData.entries || {})) {
-      tasteSigilByAxis[e.name] = { dir: e.dir, str: e.str, pole: e.pole, low: e.low, high: e.high };
+    // Build radar axes dynamically from taste sigil entries.
+    // Use sorted_keys (strength descending) from server for relevance order.
+    const sorted = tasteRadarData.sorted_keys || Object.keys(tasteRadarData.entries || {});
+    radarAxes = [];
+    for (const cid of sorted) {
+      const e = tasteRadarData.entries[cid];
+      if (!e) continue;
+      radarAxes.push({
+        key: e.name,
+        label: e.pole,
+        tasteDir: e.dir,
+        tasteStr: e.str,
+        low: e.low,
+        high: e.high,
+      });
     }
+    // Prepend taste_axis at north (emergent contrast, always first)
+    radarAxes.unshift({ key: 'taste_axis', label: 'taste', tasteDir: null, tasteStr: 0, low: '', high: '' });
     return true;
   } catch (e) {
+    radarAxes = [];
     return false;
   }
 }

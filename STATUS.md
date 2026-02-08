@@ -8,6 +8,14 @@ Phase 20 on `master` branch. 244 tests pass. Server on port 8777.
 
 ### What just happened (this session)
 
+15. **Calibration radar live preview fix** — `showStep` now sets `currentContrastId` from step's `contrast_id` (newly added to `step_to_dict`). Live preview updates radar in real-time as slider moves. `livePreview` cleared on submit and step transition.
+
+16. **Calibration radar state persistence** — `animateSigilUpdate` now merges new entries into existing ones instead of replacing. Prior calibration state (loaded from taste sigil on page open) survives as new choices arrive.
+
+17. **Calibration radar axis mapping** — Un-voted/skipped axes at midline (50%). Voted axes map strength [0,1] to radius [0.5, 1.0] so slider movement is always visible above the midline.
+
+18. **Walk progress persistence** — Choices saved to `walk_progress_{user_id}.json` after every interaction. On page reload, session restores from saved progress (same library version check). Deleted on walk completion or reset. 6 new tests (250 total).
+
 8. **Taste radar on by default** — `tasteRadarVisible = true`, toolbar button starts with `active` class. Button always visible (removed hidden-until-data logic).
 
 9. **Taste axis pinned to north** — In unified radar, taste_axis is always at position 0 (north/top), remaining axes sorted for smooth polygon.
@@ -16,9 +24,15 @@ Phase 20 on `master` branch. 244 tests pass. Server on port 8777.
 
 11. **Bug fixes (BUG-001 through BUG-004)**:
     - BUG-001: Taste radar now uses magnitude only (center=0, edge=max strength). Direction shown by dot color.
-    - BUG-002: Added `Cache-Control: no-store` to sigil_scores, taste_sigil, and ride/stats endpoints.
+    - BUG-002: Added `Cache-Control: no-store` to sigil_scores, taste_sigil, ride/stats, and all HTML page endpoints.
     - BUG-003: Category radar defaults to neutral (0.5) handles when no prefs saved.
     - BUG-004: Category filter now excludes categories at or below neutral (0.5). Only actively pulled categories participate. Remaps [0.5,1.0] to [0,1] for sharp filtering.
+
+12. **Category radar semantics fix** — Radar center = excluded (0.5 threshold). Drag maps to [0.5, 1.0]. Display shows effective filter strength (0% at threshold, 100% at max). Reset/double-click sets to 0.5 (neutral). Un-voted taste axes at 0.5 midline.
+
+13. **Dynamic radar axes** — Removed hardcoded `RADAR_AXES` (11 items). Atlas taste radar now built dynamically from `/api/atlas/taste_sigil` response. Shows ALL calibrated contrasts (14 in current sigil), sorted by strength descending, taste_axis pinned to north. `sorted_keys` added to taste sigil endpoint.
+
+14. **Calibration page taste radar** — Replaced progress pie chart with amber polygon radar on `/walk` page. Shows current calibration state: axes sorted by strength, orange/blue dots by direction, uncalibrated at midline. Updates live during calibration. Loads existing sigil on page open. Walk start and partial_sigil responses now include pole labels.
 
 ### Previous session
 

@@ -8,6 +8,7 @@ from sigiltree.walk import (
     WalkSession,
     WalkStep,
     classify_contrast,
+    delete_walk_progress,
     filter_walk_contrasts,
     EXEMPLARS_PER_SIDE,
     MIN_COLLAPSED_TO_SKIP_PCA,
@@ -160,13 +161,14 @@ class TestWalkSession:
         session = WalkSession(lib)
         assert len(session.steps) == 5  # only bipolars
 
-    def test_step_includes_contrast_name_but_not_id(self):
+    def test_step_includes_contrast_name_and_id(self):
         lib = _make_walk_library(n_bipolar=3)
         session = WalkSession(lib)
         step_dict = session.step_to_dict(session.current_step)
         assert "contrast_name" in step_dict
         assert isinstance(step_dict["contrast_name"], str)
-        assert "contrast_id" not in step_dict
+        assert "contrast_id" in step_dict
+        assert isinstance(step_dict["contrast_id"], str)
 
     def test_correct_exemplar_count_per_side(self):
         lib = _make_walk_library(n_bipolar=3)
@@ -655,4 +657,82 @@ class TestWalkSliderStrength:
         assert 1.0 in strengths
 
 
+class TestWalkProgressPersistence:
+    """Tests for save/restore of walk progress across reloads."""
+
+    def test_save_and_restore_choices(self, tmp_path):
+        """Saved choices are restored into a new session."""
+        lib = _make_walk_library(n_bipolar=5, n_unipolar=0, n_pca=0)
+        s1 = WalkSession(lib)
+        s1.record_choice("left", strength=0.6)
+        s1.record_choice("right", strength=0.8)
+        s1.save_progress(tmp_path)
+
+        s2 = WalkSession(lib)
+        assert s2.restore_progress(tmp_path)
+        assert s2.current_index == 2
+        assert len(s2.choices) == 2
+        assert s2.choices[0].strength == 0.6
+        assert s2.choices[1].strength == 0.8
+
+    def test_restore_resumes_at_correct_step(self, tmp_path):
+        """Restored session continues from where it left off."""
+        lib = _make_walk_library(n_bipolar=4, n_unipolar=0, n_pca=0)
+        s1 = WalkSession(lib)
+        s1.record_choice("left")
+        s1.record_choice("skip")
+        s1.record_choice("right")
+        s1.save_progress(tmp_path)
+
+        s2 = WalkSession(lib)
+        s2.restore_progress(tmp_path)
+        step = s2.current_step
+        assert step is not None
+        assert step.step_index == 3  # 4th step (0-indexed)
+
+    def test_restore_with_version_mismatch_returns_false(self, tmp_path):
+        """Version mismatch rejects saved progress."""
+        lib = _make_walk_library(n_bipolar=3, n_unipolar=0, n_pca=0)
+        s1 = WalkSession(lib)
+        s1.record_choice("left")
+        s1.save_progress(tmp_path)
+
+        lib2 = _make_walk_library(n_bipolar=3, n_unipolar=0, n_pca=0)
+        lib2["version"] = "different_version"
+        s2 = WalkSession(lib2)
+        assert not s2.restore_progress(tmp_path)
+        assert s2.current_index == 0
+
+    def test_restore_no_file_returns_false(self, tmp_path):
+        """No saved file returns False without error."""
+        lib = _make_walk_library(n_bipolar=3, n_unipolar=0, n_pca=0)
+        s = WalkSession(lib)
+        assert not s.restore_progress(tmp_path)
+
+    def test_delete_walk_progress(self, tmp_path):
+        """delete_walk_progress removes the file."""
+        lib = _make_walk_library(n_bipolar=3, n_unipolar=0, n_pca=0)
+        s = WalkSession(lib)
+        s.record_choice("left")
+        s.save_progress(tmp_path)
+        assert (tmp_path / "sigils" / "walk_progress_default.json").exists()
+        delete_walk_progress(tmp_path)
+        assert not (tmp_path / "sigils" / "walk_progress_default.json").exists()
+
+    def test_restored_session_can_complete(self, tmp_path):
+        """A restored session can be completed and produce a valid sigil."""
+        lib = _make_walk_library(n_bipolar=3, n_unipolar=0, n_pca=0)
+        s1 = WalkSession(lib)
+        s1.record_choice("left", strength=0.7)
+        s1.record_choice("right", strength=0.5)
+        s1.save_progress(tmp_path)
+
+        s2 = WalkSession(lib)
+        s2.restore_progress(tmp_path)
+        # Complete remaining steps
+        while not s2.is_complete:
+            result = s2.record_choice("right", strength=0.6)
+        assert result["status"] == "complete"
+        sigil = result["sigil"]
+        assert sigil["collapsed_count"] >= 2
 

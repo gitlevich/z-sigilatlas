@@ -23,3 +23,11 @@ Prioritized work items.
 9. **Persist UI state across reloads** — Button/toggle states (sigil overlay active, taste radar visible, current navigation depth, etc.) are lost on page reload. Use `sessionStorage` or `localStorage` to remember UI state per page so reloads restore the same view. Applies to all screens: atlas (sigil active, taste radar toggle, navigation path), walk (help panel state), categories (unsaved edits warning).
 
 10. **Minimap click = go up one level** — The small tile in the bottom-right corner of the atlas currently navigates home (root). Should instead go up one level (same as Esc / back button), which is the intuitive expectation when clicking a minimap overview.
+
+11. **Calibration: Space/Enter advances to next contrast** — On the calibration page, pressing Space or Enter should submit the current slider value for the current contrast and advance to the next one. Currently only arrow keys + explicit navigation work.
+
+### Epic: Settings UI
+
+12. **Semantic contrast management** — UI to set the order in which contrasts are shown during calibration and to include/exclude/add/delete semantic contrasts. Currently calibration starts with low-relevance contrasts (sharpness, tint, temperature); user should control ordering and which contrasts participate.
+
+13. **Category management (CRUD)** — UI to create, read, update, and delete semantic categories. Currently categories are derived from the contrast library with no user control over which categories exist or how they're defined.
