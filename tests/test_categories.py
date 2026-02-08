@@ -386,3 +386,94 @@ class TestCategoryPrefsPersistence:
         loaded = load_category_prefs(tmp_path)
         assert loaded["weights"]["cat_000"] == 0.9
         assert loaded["weights"]["cat_001"] == 0.3
+
+
+# ---------------------------------------------------------------------------
+# TestSigilScoresEndpointWithCategories
+# ---------------------------------------------------------------------------
+
+def _setup_atlas_artifacts(tmp_path):
+    """Create minimal atlas + contrast artifacts for endpoint tests."""
+    lib = _make_contrast_library(["sem_portrait", "sem_landscape"])
+    nodes = _make_nodes(["n1", "n2"])
+    profiles = {"n1": {"sem_portrait": 0.9, "sem_landscape": 0.2},
+                "n2": {"sem_portrait": 0.2, "sem_landscape": 0.9}}
+    coords = _make_coordinates(lib, profiles)
+
+    (tmp_path / "contrasts").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "contrasts" / "contrast_library.json").write_text(json.dumps(lib))
+    (tmp_path / "contrasts" / "coordinates.json").write_text(json.dumps(coords))
+
+    (tmp_path / "atlas" / "level0").mkdir(parents=True, exist_ok=True)
+    meta = {"nodes": nodes, "level": 0}
+    (tmp_path / "atlas" / "level0" / "meta.json").write_text(json.dumps(meta))
+
+    (tmp_path / "thumbnails").mkdir(exist_ok=True)
+    return lib, nodes
+
+
+class TestSigilScoresEndpointWithCategories:
+    @pytest.mark.asyncio
+    async def test_categories_only_returns_scores(self, tmp_path):
+        """Categories without walk sigil should return 200 with gate-modulated scores."""
+        from aiohttp.test_utils import TestClient, TestServer
+        from sigiltree.viewer_server import create_app
+
+        _setup_atlas_artifacts(tmp_path)
+        save_category_prefs(
+            {"user_id": "default", "weights": {"cat_000": 1.0}},
+            tmp_path,
+        )
+
+        app = create_app(tmp_path)
+        async with TestClient(TestServer(app)) as client:
+            resp = await client.get("/api/atlas/sigil_scores?user_id=default&level=0")
+            assert resp.status == 200
+            data = await resp.json()
+            assert data["has_categories"] is True
+            assert "n1" in data["scores"]
+            assert "n2" in data["scores"]
+            # n1 has high portrait score, n2 has low — scores should differ
+            assert data["scores"]["n1"]["score"] != data["scores"]["n2"]["score"]
+
+    @pytest.mark.asyncio
+    async def test_version_changes_when_categories_change(self, tmp_path):
+        """sigil_version must change when category prefs update, so JS cache invalidates."""
+        import time as _time
+        from aiohttp.test_utils import TestClient, TestServer
+        from sigiltree.viewer_server import create_app
+
+        _setup_atlas_artifacts(tmp_path)
+        save_category_prefs(
+            {"user_id": "default", "weights": {"cat_000": 0.5}, "created_at": 1000.0},
+            tmp_path,
+        )
+
+        app = create_app(tmp_path)
+        async with TestClient(TestServer(app)) as client:
+            resp1 = await client.get("/api/atlas/sigil_scores?user_id=default&level=0")
+            v1 = (await resp1.json())["sigil_version"]
+
+            # Update categories with a different timestamp
+            save_category_prefs(
+                {"user_id": "default", "weights": {"cat_000": 1.0}, "created_at": 2000.0},
+                tmp_path,
+            )
+
+            resp2 = await client.get("/api/atlas/sigil_scores?user_id=default&level=0")
+            v2 = (await resp2.json())["sigil_version"]
+
+            assert v1 != v2, f"Version must change when categories update: {v1!r}"
+
+    @pytest.mark.asyncio
+    async def test_no_sigil_no_categories_returns_404(self, tmp_path):
+        """No walk sigil and no categories → 404."""
+        from aiohttp.test_utils import TestClient, TestServer
+        from sigiltree.viewer_server import create_app
+
+        _setup_atlas_artifacts(tmp_path)
+
+        app = create_app(tmp_path)
+        async with TestClient(TestServer(app)) as client:
+            resp = await client.get("/api/atlas/sigil_scores?user_id=default&level=0")
+            assert resp.status == 404

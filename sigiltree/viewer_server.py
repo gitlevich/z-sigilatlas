@@ -528,8 +528,14 @@ async def handle_atlas_sigil_scores(request: web.Request) -> web.Response:
     level = int(request.query.get("level", "0"))
 
     sigil = load_sigil(artifact_dir, user_id)
-    if sigil is None:
-        return web.json_response({"error": "No sigil found"}, status=404)
+
+    # Load category preferences for multiplicative gate
+    cat_prefs = load_category_prefs(artifact_dir, user_id)
+    cat_weights = cat_prefs.get("weights", {}) if cat_prefs else None
+
+    # Need either a walk sigil or category preferences
+    if sigil is None and cat_weights is None:
+        return web.json_response({"error": "No sigil or categories"}, status=404)
 
     lib_path = artifact_dir / "contrasts" / "contrast_library.json"
     if not lib_path.exists():
@@ -545,21 +551,31 @@ async def handle_atlas_sigil_scores(request: web.Request) -> web.Response:
     if meta is None:
         return web.json_response({"error": f"No atlas level {level}"}, status=404)
 
-    # Load category preferences for multiplicative gate
-    cat_prefs = load_category_prefs(artifact_dir, user_id)
-    cat_weights = cat_prefs.get("weights", {}) if cat_prefs else None
-
     scores = compute_sigil_scores(
         sigil, library, coordinates, meta["nodes"],
         category_weights=cat_weights,
     )
 
-    collapsed_names = [e["contrast_name"] for e in sigil.get("entries", {}).values()]
+    collapsed_names = [
+        e["contrast_name"] for e in sigil.get("entries", {}).values()
+    ] if sigil else []
+    has_categories = cat_weights is not None and len(cat_weights) > 0
+
+    # Build version string that changes when either sigil or categories change,
+    # so the JS cache invalidates properly.
+    version_parts = []
+    if sigil:
+        version_parts.append(sigil.get("version", ""))
+    if has_categories:
+        cat_ts = cat_prefs.get("created_at", "0") if cat_prefs else "0"
+        version_parts.append(f"cat_{cat_ts}")
+    sigil_version = "+".join(version_parts) or "none"
 
     return web.json_response({
         "user_id": user_id,
-        "sigil_version": sigil.get("version", ""),
+        "sigil_version": sigil_version,
         "collapsed_contrasts": collapsed_names,
+        "has_categories": has_categories,
         "level": level,
         "scores": scores,
     })
@@ -3027,7 +3043,17 @@ async function fetchSigilScores(level) {
     sigilMeta = {
       sigil_version: data.sigil_version,
       collapsed_contrasts: data.collapsed_contrasts,
+      has_categories: data.has_categories || false,
     };
+    // Highlight categories button when filter is active
+    const catBtn = document.getElementById('toolbar-categories');
+    if (catBtn) {
+      if (data.has_categories) {
+        catBtn.classList.add('active');
+      } else {
+        catBtn.classList.remove('active');
+      }
+    }
     sigilScores[level] = data.scores;
     sigilScores[`_key_${level}`] = `${data.sigil_version}_${level}`;
     stretchSigilScores(level);
