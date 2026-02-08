@@ -3506,19 +3506,29 @@ function drawRadar(node) {
   if (!zs) return;
 
   // Gather values for this node across radar axes
-  const values = [];
-  const labels = [];
+  const items = [];
   for (const axis of RADAR_AXES) {
     const contrastData = zs[axis.key];
     if (!contrastData) continue;
     const nodeData = contrastData[node.node_id];
     if (!nodeData) continue;
-    // Clamp z_mean to [-2.5, 2.5] and normalize to [0, 1]
     const clamped = Math.max(-2.5, Math.min(2.5, nodeData.z_mean));
-    values.push((clamped + 2.5) / 5.0);
-    labels.push(axis.label);
+    items.push({
+      label: axis.label,
+      key: axis.key,
+      value: (clamped + 2.5) / 5.0,
+      zMean: nodeData.z_mean,
+    });
   }
-  if (values.length < 3) return;
+  if (items.length < 3) return;
+
+  // Sort for maximally smooth polygon: ascending by value wraps
+  // monotonically around the circle, minimizing jaggedness.
+  items.sort((a, b) => a.value - b.value);
+  const values = items.map(d => d.value);
+  const labels = items.map(d => d.label);
+  const keys   = items.map(d => d.key);
+  const zMeans = items.map(d => d.zMean);
 
   const n = values.length;
   const cw = canvas.clientWidth;
@@ -3584,30 +3594,43 @@ function drawRadar(node) {
   ctx.lineWidth = 1.5;
   ctx.stroke();
 
-  // Data points
+  // Data points — taste axis colored green/red by z-mean sign
   for (let i = 0; i < n; i++) {
     const angle = startAngle + i * angleStep;
     const r = values[i] * radius;
     const x = centerX + Math.cos(angle) * r;
     const y = centerY + Math.sin(angle) * r;
-    ctx.fillStyle = 'rgba(100,200,255,0.8)';
-    ctx.beginPath();
-    ctx.arc(x, y, 2.5, 0, 2 * Math.PI);
+    const isTaste = keys[i] === 'taste_axis';
+    if (isTaste) {
+      ctx.fillStyle = zMeans[i] >= 0 ? 'rgba(80,220,120,0.9)' : 'rgba(220,80,80,0.9)';
+      ctx.beginPath();
+      ctx.arc(x, y, 3.5, 0, 2 * Math.PI);
+    } else {
+      ctx.fillStyle = 'rgba(100,200,255,0.8)';
+      ctx.beginPath();
+      ctx.arc(x, y, 2.5, 0, 2 * Math.PI);
+    }
     ctx.fill();
   }
 
-  // Axis labels
+  // Axis labels — taste axis colored green/red
   ctx.font = '10px system-ui';
   ctx.textBaseline = 'middle';
-  ctx.fillStyle = 'rgba(200,200,200,0.7)';
   for (let i = 0; i < n; i++) {
     const angle = startAngle + i * angleStep;
     const lx = centerX + Math.cos(angle) * (radius + 16);
     const ly = centerY + Math.sin(angle) * (radius + 16);
-    // Align text based on position
     if (Math.abs(Math.cos(angle)) < 0.3) ctx.textAlign = 'center';
     else if (Math.cos(angle) > 0) ctx.textAlign = 'left';
     else ctx.textAlign = 'right';
+    const isTaste = keys[i] === 'taste_axis';
+    if (isTaste) {
+      ctx.font = 'bold 10px system-ui';
+      ctx.fillStyle = zMeans[i] >= 0 ? 'rgba(80,220,120,0.9)' : 'rgba(220,80,80,0.9)';
+    } else {
+      ctx.font = '10px system-ui';
+      ctx.fillStyle = 'rgba(200,200,200,0.7)';
+    }
     ctx.fillText(labels[i], lx, ly);
   }
 
