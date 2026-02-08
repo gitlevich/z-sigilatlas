@@ -14,6 +14,12 @@ Phase 20 on `master` branch. 244 tests pass. Server on port 8777.
 
 10. **Reset clears everything** — `delete_sigil()` now also removes `categories_{user_id}.json`. After reset, sigil overlay returns 404 and doesn't alter layout.
 
+11. **Bug fixes (BUG-001 through BUG-004)**:
+    - BUG-001: Taste radar now uses magnitude only (center=0, edge=max strength). Direction shown by dot color.
+    - BUG-002: Added `Cache-Control: no-store` to sigil_scores, taste_sigil, and ride/stats endpoints.
+    - BUG-003: Category radar defaults to neutral (0.5) handles when no prefs saved.
+    - BUG-004: Category filter now excludes categories at or below neutral (0.5). Only actively pulled categories participate. Remaps [0.5,1.0] to [0,1] for sharp filtering.
+
 ### Previous session
 
 4. **Calibration onboarding** (backlog item 4) — Inline help panel on `/walk` with `?` toggle button. Shows on first visit.

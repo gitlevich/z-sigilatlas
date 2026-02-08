@@ -116,15 +116,15 @@ class TestComputeCategoryGate:
         gates = compute_category_gate(None, lib, coords, nodes)
         assert gates["n1"] == 1.0
 
-    def test_all_zero_weights_returns_all_zeros(self):
-        """All handles at center = everything dimmed."""
+    def test_all_zero_weights_returns_no_filtering(self):
+        """All handles at or below neutral = no filtering (gate 1.0)."""
         lib = _make_contrast_library()
         nodes = _make_nodes(["n1", "n2"])
         coords = _make_coordinates(lib, {"n1": {}, "n2": {}})
 
         gates = compute_category_gate({"cat_000": 0.0, "cat_001": 0.0}, lib, coords, nodes)
-        assert gates["n1"] == 0.0
-        assert gates["n2"] == 0.0
+        assert gates["n1"] == 1.0
+        assert gates["n2"] == 1.0
 
     def test_single_category_high_node_gets_high_gate(self):
         """Node with high portrait score gets high gate when portrait is active."""

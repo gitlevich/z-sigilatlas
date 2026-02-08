@@ -589,7 +589,7 @@ async def handle_atlas_sigil_scores(request: web.Request) -> web.Response:
         version_parts.append(f"cat_{cat_ts}")
     sigil_version = "+".join(version_parts) or "none"
 
-    return web.json_response({
+    resp = web.json_response({
         "user_id": user_id,
         "sigil_version": sigil_version,
         "collapsed_contrasts": collapsed_names,
@@ -597,6 +597,8 @@ async def handle_atlas_sigil_scores(request: web.Request) -> web.Response:
         "level": level,
         "scores": scores,
     })
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
 
 
 _POLE_OVERRIDES: dict[str, tuple[str, str]] = {
@@ -655,11 +657,13 @@ async def handle_atlas_taste_sigil(request: web.Request) -> web.Response:
             "pole": winning,
         }
 
-    return web.json_response({
+    resp = web.json_response({
         "entries": entries,
         "collapsed_count": len(entries),
         "total_choices": sigil.get("total_choices", 0),
     })
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
 
 
 async def handle_taste_axis(request: web.Request) -> web.Response:
@@ -927,7 +931,9 @@ async def handle_ride_stats(request: web.Request) -> web.Response:
             level_taste_zs = taste["zsummaries"].get(str(level), {})
             if level_taste_zs:
                 zsummaries["taste_axis"] = level_taste_zs
-        return web.json_response({"level": int(level), "zsummaries": zsummaries, "correlations": stats["correlations"]})
+        resp = web.json_response({"level": int(level), "zsummaries": zsummaries, "correlations": stats["correlations"]})
+        resp.headers["Cache-Control"] = "no-store"
+        return resp
 
     return web.json_response(stats)
 
@@ -2749,7 +2755,11 @@ async function loadCategories() {
   const r = await fetch('/api/categories/data?user_id=default');
   const data = await r.json();
   categories = data.categories;
-  // Pre-fill from saved weights
+  // Default all categories to neutral midpoint
+  for (const cat of categories) {
+    weights[cat.contrast_id] = 0.5;
+  }
+  // Override with saved weights if they exist
   for (const [cid, val] of Object.entries(data.existing_weights || {})) {
     weights[cid] = val;
   }
@@ -3586,7 +3596,7 @@ function drawRadar(node) {
   const items = RADAR_AXES.map(axis => {
     // Taste value for this axis
     const te = tasteSigilByAxis[axis.key];
-    const tasteVal = te ? tasteRadarVal(te) : 0.5;
+    const tasteVal = te ? tasteRadarVal(te) : 0;
     const tasteDir = te ? te.dir : null;
     const tastePole = te ? te.pole : null;
 
@@ -3653,9 +3663,9 @@ function drawRadar(node) {
     ctx.stroke();
   }
 
-  // Middle ring (z=0) brighter
-  ctx.strokeStyle = 'rgba(255,255,255,0.2)';
-  ctx.lineWidth = 0.75;
+  // Half-strength ring slightly brighter for reference
+  ctx.strokeStyle = 'rgba(255,255,255,0.15)';
+  ctx.lineWidth = 0.5;
   ctx.beginPath();
   ctx.arc(centerX, centerY, radius * 0.5, 0, 2 * Math.PI);
   ctx.stroke();
@@ -4608,10 +4618,9 @@ let tasteRadarData = null;  // {entries: {cid: {name, dir, str, pole}}, collapse
 let tasteSigilByAxis = {};  // {axisKey: {dir, str, pole, low, high}}
 
 function tasteRadarVal(entry) {
-  // Direction encodes which pole the user preferred.
-  // Right = outward (0.5 .. 1.0), Left = inward (0.0 .. 0.5).
-  if (entry.dir === 'right') return 0.5 + entry.str * 0.5;
-  return 0.5 - entry.str * 0.5;
+  // Magnitude only: center=0 (no preference), edge=1 (max strength).
+  // Direction is shown by dot color (orange=right, blue=left).
+  return entry.str;
 }
 
 async function fetchTasteSigil() {

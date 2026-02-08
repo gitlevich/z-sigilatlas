@@ -40,12 +40,17 @@ def compute_category_gate(
     if not category_weights:
         return {node["node_id"]: 1.0 for node in nodes}
 
-    # Cube weights so low values vanish (0.13³ = 0.002) while high
-    # values stay strong (0.97³ = 0.91). Without this, many low-weight
-    # categories dilute the signal from the one the user cares about.
-    active = {cid: w ** 3 for cid, w in category_weights.items() if w > 0.01}
+    # Only categories actively pulled above neutral (0.5) participate.
+    # Weight is remapped: 0.5 -> 0 (excluded), 1.0 -> 1 (full strength).
+    # This makes the filter sharp: default/neutral categories are invisible.
+    active = {}
+    for cid, w in category_weights.items():
+        if w > 0.5:
+            active[cid] = (w - 0.5) * 2.0  # remap [0.5, 1.0] -> [0, 1]
+        # Categories at or below 0.5 are excluded entirely
     if not active:
-        return {node["node_id"]: 0.0 for node in nodes}
+        # No categories above neutral — no filtering
+        return {node["node_id"]: 1.0 for node in nodes}
 
     # Build lookup: contrast_id -> {name, quantiles, coords}
     id_to_info = {}
