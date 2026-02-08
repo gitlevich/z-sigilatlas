@@ -4,29 +4,27 @@ Current state snapshot for session resumption. See [JOURNAL.md](JOURNAL.md) for 
 
 ## Current State (2026-02-07)
 
-Phase 19 on `feature/detail-profile` branch. 244 tests pass. Server on port 8777.
+Phase 20 on `master` branch. 244 tests pass. Server on port 8777.
 
 ### What just happened (this session)
 
-1. **Categories integration** — Fixed `handle_atlas_sigil_scores` to allow categories-only mode (no walk sigil needed). Added `has_categories` flag, categories button highlight. Cache invalidation fix: `sigil_version` now includes category timestamp so JS cache busts on changes. 3 endpoint tests added.
+4. **Calibration onboarding text** (backlog item 4) — Added intro overlay to `/walk` page:
+   - Shows on first visit: explains what calibration does, how pairs represent visual contrasts, how to use slider
+   - Controls hint: arrow keys, slider, Space to skip, Esc to exit
+   - Dismisses on click or any keypress, then starts the walk
+   - Skipped on return visits via sessionStorage (`sigilatlas_walk_intro_seen`)
+   - Styled to match atlas help overlay pattern (dark overlay, centered card, `.intro-box`)
 
-2. **Sharper category gating** — Cubed weights (`w^3`) so low-weight categories contribute almost nothing while high weights dominate. Fixes user report that dialing one category to 100% had diluted visual effect. Reset button added to `/categories` page.
+### Previous session
 
-3. **Materialized emergent taste contrast** (backlog item 2) — The calibration walk's dot product is now a first-class contrast:
-   - New module `sigiltree/taste_axis.py` with `compute_taste_coordinates` (per-image projection) and `materialize_taste_axis` (I/O wrapper)
-   - Per-image taste coordinate for all 874 images
-   - Z-summaries computed for all 5 atlas levels
-   - Exemplars (top/bottom/median 12 images)
-   - Components list documenting which sigil entries contribute
-   - Persisted to `artifacts/sigils/taste_axis_{user_id}.json`
-   - Merged into ride stats response (radar shows "taste" axis on hover)
-   - New endpoint `/api/atlas/taste_axis` returns exemplars/quantiles/components
-   - 16 new tests in `tests/test_taste_axis.py`
+1. **Categories integration** — categories-only mode, cache invalidation fix, 3 endpoint tests.
+2. **Sharper category gating** — cubed weights, reset button.
+3. **Materialized emergent taste contrast** (backlog item 2) — first-class taste axis with per-image coordinates, z-summaries, exemplars, radar integration, `/api/atlas/taste_axis` endpoint, 16 tests.
 
 ### What's live
 
 - **Atlas viewer** — 5-level treemap of 874 images in 960 nodes
-- **Calibration walk** (`/walk`) — Unified bias slider with arrow keys
+- **Calibration walk** (`/walk`) — Unified bias slider with arrow keys, onboarding intro overlay on first visit
 - **Category filter** (`/categories`) — radar chart with 11 categories, reset button, cubed weights for sharp gating
 - **Sigil overlay** — toggle in toolbar. Dimming + golden halo. Categories button highlighted when filter active.
 - **Taste profile** — radar in atlas toolbar, now includes "taste" axis
@@ -80,10 +78,9 @@ uv run pytest tests/ -x                         # run tests
 fly deploy                                       # deploy to Fly.io
 ```
 
-### Recent commits on feature/detail-profile
+### Recent commits on master
 
 ```
-5cf57a3 Category gate: cube weights for sharper filtering, add reset button
-ddd2b08 Categories integration: allow categories-only mode, fix cache invalidation
+(pending) Calibration onboarding: intro overlay on first walk visit
 b308297 Unified walk+slider: signed bias replaces two-step side+strength flow
 ```

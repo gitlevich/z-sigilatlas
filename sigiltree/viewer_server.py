@@ -1783,6 +1783,24 @@ body {
 .done-overlay.visible { opacity: 1; pointer-events: auto; }
 .done-msg { font-size: 24px; color: #ccc; font-weight: 300; }
 .done-detail { font-size: 14px; color: #666; }
+/* Help panel (inline, below progress bar) */
+.help-btn {
+  position: fixed; top: 12px; left: 90px; z-index: 50;
+  background: none; border: 1px solid #444; color: #888;
+  font-size: 13px; padding: 6px 12px; border-radius: 14px;
+  cursor: pointer; transition: color 0.15s, border-color 0.15s;
+}
+.help-btn:hover { color: #ccc; border-color: #888; }
+#help-panel {
+  display: none; max-width: 720px; width: 90%; margin: 0 auto;
+  padding: 14px 24px 12px; background: #1a1a1a;
+  border: 1px solid #333; border-radius: 8px;
+  color: #999; font-size: 12px; line-height: 1.65;
+}
+#help-panel.visible { display: block; }
+#help-panel p { margin: 0 0 8px; }
+#help-panel .controls-hint { color: #666; }
+#help-panel .controls-hint span { color: #888; }
 #sigil-radar {
   position: fixed; bottom: 24px; right: 16px;
   width: 220px; height: 220px;
@@ -1826,6 +1844,7 @@ body {
 <body>
 
 <button class="exit-btn" onclick="window.location='/atlas'">exit <span class="hint">[Esc]</span></button>
+<button class="help-btn" onclick="toggleHelp()">?</button>
 <div id="contrast-label"></div>
 <div class="arena">
   <div class="mosaic-col" id="col-left" onclick="selectSide('left')">
@@ -1852,6 +1871,15 @@ body {
 <div id="progress" class="progress-bar"></div>
 <canvas id="sigil-radar" width="220" height="220"></canvas>
 <div id="sigil-count"></div>
+<div id="help-panel">
+  <p>Pairs of image mosaics, each representing opposite ends of a visual contrast. Pick the side you prefer, then set how strongly you feel. The atlas learns your taste and highlights matching neighborhoods.</p>
+  <div class="controls-hint">
+    <span>&larr; / &rarr;</span> choose a side &nbsp;&middot;&nbsp;
+    <span>slider</span> set strength &nbsp;&middot;&nbsp;
+    <span>Space</span> skip &nbsp;&middot;&nbsp;
+    <span>Esc</span> exit
+  </div>
+</div>
 <div id="done-overlay" class="done-overlay">
   <div class="done-msg" id="done-msg">Preferences recorded.</div>
   <div class="done-detail" id="done-detail">Returning to atlas...</div>
@@ -2231,8 +2259,18 @@ function renderProgress(progress) {
   }
 }
 
+// Help panel
+const helpPanel = document.getElementById('help-panel');
+function toggleHelp() {
+  helpPanel.classList.toggle('visible');
+  if (helpPanel.classList.contains('visible')) {
+    sessionStorage.setItem('sigilatlas_walk_help_seen', '1');
+  }
+}
+
 // Keyboard controls
 document.addEventListener('keydown', e => {
+  if (e.key === '?') { toggleHelp(); return; }
   if (e.key === 'ArrowLeft' || e.key === 'a' || e.key === 'A') {
     e.preventDefault();
     if (choosing || !currentStep) return;
@@ -2268,6 +2306,10 @@ document.addEventListener('keydown', e => {
   }
 });
 
+// Show help on first visit, always start walk
+if (!sessionStorage.getItem('sigilatlas_walk_help_seen')) {
+  helpPanel.classList.add('visible');
+}
 startWalk();
 </script>
 </body>
